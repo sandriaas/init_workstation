@@ -228,6 +228,13 @@ prompt_resource_and_vm_basics() {
   ask "Total vCPUs for VM? [min 2, max ${VM_VCPUS_MAX}, default ${VM_VCPUS_DEFAULT}]: "; read -r VM_VCPUS
   ask "RAM (GB) for VM? [total: ${TOTAL_RAM_GB}, default ${VM_RAM_GB_DEFAULT}]: "; read -r VM_RAM_GB
   ask "Disk size (GB)? [${VM_DISK_GB_DEFAULT}]: "; read -r VM_DISK_GB
+  # VM user password for autoinstall (stored as SHA-512 hash only)
+  ask "VM user password (for Ubuntu autoinstall): "; read -rs VM_PASSWORD_PLAIN; echo ""
+  VM_PASSWORD_PLAIN="${VM_PASSWORD_PLAIN:-changeme123}"
+  VM_PASSWORD_HASH="$(openssl passwd -6 "${VM_PASSWORD_PLAIN}" 2>/dev/null \
+    || python3 -c "import crypt,sys; print(crypt.crypt(sys.argv[1],crypt.mksalt(crypt.METHOD_SHA512)))" "${VM_PASSWORD_PLAIN}" 2>/dev/null \
+    || echo "\$6\$invalid")"
+  unset VM_PASSWORD_PLAIN
 
   VM_NAME="$(default_if_empty "$VM_NAME" "$VM_NAME_DEFAULT")"
   VM_USER="$(default_if_empty "$VM_USER" "$VM_USER_DEFAULT")"
@@ -529,6 +536,8 @@ write_vm_conf() {
 VM_NAME="${VM_NAME}"
 VM_HOSTNAME="${VM_HOSTNAME}"
 VM_USER="${VM_USER}"
+# SHA-512 hash of VM user password (used by Ubuntu autoinstall — never store plaintext)
+VM_PASSWORD_HASH="${VM_PASSWORD_HASH:-}"
 
 # ── Machine / Firmware ────────────────────────────────────────────────────────
 # machine: pc (i440fx) required for legacy IGD passthrough; q35 for everything else
@@ -554,6 +563,9 @@ VM_ISO_PATH="${VM_ISO_PATH}"
 VM_ISO_URL="${VM_ISO_URL}"
 VM_ISO_SHA256_URL="${VM_ISO_SHA256_URL}"
 VM_BOOT_ORDER="${VM_BOOT_ORDER:-hd,cdrom}"
+# Autoinstall: yes = cloud-init autoinstall (fully unattended), no = manual
+VM_AUTOINSTALL="${VM_AUTOINSTALL:-yes}"
+VM_SEED_ISO="${VM_SEED_ISO:-${VM_CONF_DIR}/${VM_NAME}-seed.iso}"
 
 # ── Network ───────────────────────────────────────────────────────────────────
 VM_NET_TYPE="${VM_NET_TYPE:-network}"
@@ -705,6 +717,90 @@ EOF
   warn "Kernel args/SR-IOV host config updated. Reboot host before VF attach if VFs are not visible yet."
 }
 
+# =============================================================================
+# Ubuntu autoinstall helpers
+# =============================================================================
+
+# Generate cloud-init user-data (autoinstall format) + empty meta-data
+# Written to ${VM_CONF_DIR}/${VM_NAME}-seed/user-data
+generate_autoinstall() {
+  source_vm_conf
+  local seed_dir="${VM_CONF_DIR}/${VM_NAME}-seed"
+  mkdir -p "$seed_dir"
+
+  info "Generating Ubuntu autoinstall user-data → ${seed_dir}/user-data"
+
+  local pw_hash="${VM_PASSWORD_HASH:-}"
+  if [ -z "$pw_hash" ]; then
+    warn "VM_PASSWORD_HASH not set — using default password 'changeme123'. Change after first login!"
+    pw_hash="$(openssl passwd -6 'changeme123' 2>/dev/null || echo '\$6\$invalid')"
+  fi
+
+  cat > "${seed_dir}/user-data" <<EOF
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: ${VM_HOSTNAME}
+    username: ${VM_USER}
+    password: '${pw_hash}'
+  ssh:
+    install-server: true
+    allow-pw: true
+    authorized-keys: []
+  storage:
+    layout:
+      name: lvm
+  packages:
+    - openssh-server
+    - curl
+    - wget
+    - net-tools
+  late-commands:
+    - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /target/etc/ssh/sshd_config
+  user-data:
+    disable_root: false
+EOF
+
+  # meta-data must exist (can be empty for nocloud)
+  : > "${seed_dir}/meta-data"
+
+  ok "Autoinstall user-data written to ${seed_dir}/user-data"
+}
+
+# Create seed ISO (labeled 'cidata') from user-data + meta-data
+create_seed_iso() {
+  source_vm_conf
+  local seed_dir="${VM_CONF_DIR}/${VM_NAME}-seed"
+  local seed_iso="${VM_CONF_DIR}/${VM_NAME}-seed.iso"
+
+  [ -f "${seed_dir}/user-data" ] || { warn "user-data missing — run generate_autoinstall first"; return 1; }
+
+  # Ensure xorriso available (install if not)
+  if ! command -v xorriso &>/dev/null; then
+    info "Installing xorriso for seed ISO creation..."
+    case "$OS" in
+      arch)    sudo pacman -S --noconfirm --needed xorriso ;;
+      ubuntu)  sudo apt-get install -y xorriso ;;
+      fedora)  sudo dnf install -y xorriso ;;
+      proxmox) sudo apt-get install -y xorriso ;;
+    esac
+  fi
+
+  info "Creating seed ISO → ${seed_iso}"
+  xorriso -as mkisofs \
+    -output "${seed_iso}" \
+    -volid "cidata" \
+    -joliet -rock \
+    "${seed_dir}/" 2>/dev/null
+  ok "Seed ISO created: ${seed_iso}"
+  # Update VM_CONF with the seed ISO path
+  sed -i "s|^VM_SEED_ISO=.*|VM_SEED_ISO=\"${seed_iso}\"|" "$VM_CONF" || true
+}
+
 create_vm() {
   section "Create VM"
   source_vm_conf
@@ -717,8 +813,22 @@ create_vm() {
   if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     ok "VM '${VM_NAME}' already exists. Skipping virt-install."
   else
+    # ── Generate autoinstall seed if enabled ──────────────────────────────────
+    local extra_args="" seed_disk_arg=""
+    if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
+      generate_autoinstall
+      create_seed_iso
+      source_vm_conf  # reload to pick up VM_SEED_ISO
+      seed_disk_arg="--disk path=${VM_SEED_ISO},device=cdrom,readonly=on,format=raw"
+      # Ubuntu 24.04 server: kernel/initrd live at casper/ in the ISO
+      # autoinstall + ds=nocloud picks up seed ISO labeled 'cidata'
+      extra_args="autoinstall ds=nocloud;s=/cidata/ console=ttyS0,115200n8 quiet ---"
+      info "Ubuntu autoinstall enabled — installation will run unattended (~10-15 min)"
+    fi
+
     # Machine type must be pc (i440fx) for legacy IGD passthrough — NOT q35
-    # OVMF/UEFI required per LongQT-sea/intel-igpu-passthru guide
+    # --location extracts kernel/initrd from ISO for extra-args injection
+    # shellcheck disable=SC2086
     sudo virt-install \
       --name "$VM_NAME" \
       --memory "$VM_RAM_MB" \
@@ -732,12 +842,21 @@ create_vm() {
       --graphics "${VM_GRAPHICS:-none}" \
       --video "${VM_VIDEO:-none}" \
       --console "${VM_CONSOLE:-pty,target_type=serial}" \
-      --cdrom "$VM_ISO_PATH" \
+      --location "${VM_ISO_PATH},kernel=casper/vmlinuz,initrd=casper/initrd" \
+      ${seed_disk_arg} \
+      ${extra_args:+--extra-args "$extra_args"} \
       --noautoconsole
-    ok "VM created. Complete Ubuntu installer via: sudo virsh console ${VM_NAME}"
+
+    if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
+      ok "VM created with autoinstall. Ubuntu is installing unattended."
+      info "Monitor progress:  sudo virsh console ${VM_NAME}  (exit: Ctrl+])"
+      info "Phase 3 will wait for SSH automatically once installation completes."
+    else
+      ok "VM created. Complete Ubuntu installer via: sudo virsh console ${VM_NAME}"
+    fi
   fi
 
-  # virtiofs shared storage
+  # ── virtiofs shared storage ────────────────────────────────────────────────
   TMP_VIRTIOFS_XML="/tmp/${VM_NAME}-virtiofs.xml"
   cat > "$TMP_VIRTIOFS_XML" <<EOF
 <filesystem type='mount' accessmode='passthrough'>
@@ -748,10 +867,9 @@ create_vm() {
 EOF
   sudo virsh attach-device "$VM_NAME" "$TMP_VIRTIOFS_XML" --config >/dev/null 2>&1 || true
 
-  # GPU SR-IOV VF passthrough with ROM + x-igd-lpc (per LongQT-sea/intel-igpu-passthru)
+  # ── GPU SR-IOV VF passthrough ──────────────────────────────────────────────
   if [ "${GPU_PASSTHROUGH:-no}" = "yes" ] && [ -f "${GPU_ROM_PATH:-/usr/share/kvm/igd.rom}" ]; then
     # NEVER pass the PF (00:02.0) — only VF (00:02.1)
-    # Parse VF PCI address from PF: 0000:00:02.0 → 0000:00:02.1
     PF_DOMAIN="${GPU_PCI_ID%%:*}"
     PF_BUS="${GPU_PCI_ID#*:}"; PF_BUS="${PF_BUS%%:*}"
     PF_SLOT_FN="${GPU_PCI_ID##*:}"; PF_SLOT="${PF_SLOT_FN%%.*}"
@@ -771,32 +889,14 @@ EOF
     sudo virsh attach-device "$VM_NAME" "$TMP_VF_XML" --config >/dev/null 2>&1 \
       || warn "Could not attach VF yet — reboot host first if SR-IOV VFs are not visible."
 
-    # x-igd-lpc required for Ice Lake / Rocket Lake / Tiger Lake / Alder Lake and newer
     if [ "${GPU_IGD_LPC:-no}" = "yes" ]; then
-      TMP_QEMU_XML="/tmp/${VM_NAME}-qemu-args.xml"
-      cat > "$TMP_QEMU_XML" <<EOF
-<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
-  <qemu:commandline>
-    <qemu:arg value='-set'/>
-    <qemu:arg value='device.hostpci0.x-igd-lpc=on'/>
-  </qemu:commandline>
-</domain>
-EOF
-      # Merge qemu:commandline into existing VM XML
-      EXISTING_XML="$(sudo virsh dumpxml "$VM_NAME")"
-      if echo "$EXISTING_XML" | grep -q "qemu:commandline"; then
-        ok "qemu:commandline already present in VM XML."
+      if command -v virt-xml >/dev/null 2>&1; then
+        sudo virt-xml "$VM_NAME" --edit --qemu-commandline='-set device.hostpci0.x-igd-lpc=on' 2>/dev/null \
+          || warn "Could not auto-add x-igd-lpc. Add manually: virsh edit ${VM_NAME}"
       else
-        # virt-xml can append qemu args; fallback: instruct user
-        if command -v virt-xml >/dev/null 2>&1; then
-          sudo virt-xml "$VM_NAME" --edit --qemu-commandline='-set device.hostpci0.x-igd-lpc=on' 2>/dev/null \
-            || warn "Could not auto-add x-igd-lpc arg. Add manually: virsh edit ${VM_NAME}"
-        else
-          warn "Add x-igd-lpc manually to VM XML (required for Alder Lake+):"
-          warn "  sudo virsh edit ${VM_NAME}"
-          warn "  Add inside <domain>:"
-          warn "    <qemu:commandline><qemu:arg value='-set'/><qemu:arg value='device.hostpci0.x-igd-lpc=on'/></qemu:commandline>"
-        fi
+        warn "Add x-igd-lpc manually (required for Alder Lake+):"
+        warn "  sudo virsh edit ${VM_NAME}"
+        warn "  Add: <qemu:commandline><qemu:arg value='-set'/><qemu:arg value='device.hostpci0.x-igd-lpc=on'/></qemu:commandline>"
       fi
     fi
   elif [ "${GPU_PASSTHROUGH:-no}" = "yes" ]; then
@@ -857,6 +957,8 @@ print_summary() {
   echo -e "${BOLD}  ── Files ───────────────────────────────────────────────────${RESET}"
   printf "  %-18s %s\n" "VM conf:"       "$VM_CONF"
   printf "  %-18s %s\n" "State:"         "${VM_CONF_DIR}/.state"
+  [ -f "${VM_CONF_DIR}/${VM_NAME}-seed.iso" ] && \
+    printf "  %-18s %s\n" "Seed ISO:"    "${VM_CONF_DIR}/${VM_NAME}-seed.iso"
   echo ""
   echo -e "${BOLD}  ── Network Diagram ─────────────────────────────────────────${RESET}"
   echo "  Internet ──cloudflare──▶ Host ($HOST_IP)"
@@ -864,15 +966,22 @@ print_summary() {
   echo "                                    VM tunnel: ${VM_TUNNEL_HOST}"
   echo ""
   echo -e "${YELLOW}  ── Next Steps ───────────────────────────────────────────────${RESET}"
-  echo "  1. Complete Ubuntu installer (if still running):"
-  echo "       sudo virsh console ${VM_NAME}"
-  echo ""
-  echo "  2. Run Phase 3 (configure VM internals):"
+  if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
+    echo "  Ubuntu is installing AUTOMATICALLY (unattended, ~10-15 min)."
+    echo "  Optional — watch progress:  sudo virsh console ${VM_NAME}  (exit: Ctrl+])"
+    echo ""
+    echo "  Run Phase 3 when ready (it will wait for SSH automatically):"
+  else
+    echo "  1. Complete Ubuntu installer:"
+    echo "       sudo virsh console ${VM_NAME}"
+    echo ""
+    echo "  2. Run Phase 3 after Ubuntu finishes:"
+  fi
   echo "       sudo bash scripts/phase3.sh"
   echo "     or:"
   echo "       bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3.sh)"
   echo ""
-  echo "  3. Verify with:"
+  echo "  Verify with:"
   echo "       bash scripts/check.sh"
   echo ""
   _snap_summary

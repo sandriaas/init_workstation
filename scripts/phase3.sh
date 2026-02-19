@@ -116,56 +116,47 @@ select_conf() {
 }
 
 # =============================================================================
-# Step 1: Ensure VM is defined + running; walk user through Ubuntu installer
+# Step 1: Ensure VM is defined + running
 # =============================================================================
 ensure_vm_running() {
-  section "Step 1 — Start VM / Ubuntu Installer"
+  section "Step 1 — Start VM"
 
-  # Define VM if not yet created (idempotent — user may rerun phase3 without phase2)
   if ! virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-    warn "VM '${VM_NAME}' not yet defined. Run scripts/phase2.sh first."
+    err "VM '${VM_NAME}' not yet defined. Run scripts/phase2.sh first."
     exit 1
   fi
 
   local state; state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
-  info "VM '${VM_NAME}' current state: ${state}"
+  info "VM '${VM_NAME}' state: ${state}"
 
-  if [ "$state" != "running" ]; then
+  if [ "$state" = "running" ]; then
+    ok "VM is running."
+  else
     confirm "Start VM '${VM_NAME}' now?" && virsh start "$VM_NAME"
     sleep 2
     state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
     [ "$state" = "running" ] && ok "VM started." || { err "Failed to start VM."; exit 1; }
+  fi
+
+  if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
+    info "Ubuntu autoinstall is running inside the VM (~10-15 min total)."
+    info "Optional — watch progress: sudo virsh console ${VM_NAME}  (exit: Ctrl+])"
   else
-    ok "VM is running."
+    # Manual install — check if already SSH-reachable (install may already be done)
+    local vm_ip; vm_ip="$(_resolve_vm_ip)"
+    if _ssh_alive "$vm_ip" 2>/dev/null; then
+      ok "VM SSH already reachable — Ubuntu installation complete."
+      VM_SSH_HOST="$vm_ip"
+      return
+    fi
+    echo ""
+    echo -e "${YELLOW}  Ubuntu installer is running. Complete it via the console:${RESET}"
+    echo -e "    ${BOLD}sudo virsh console ${VM_NAME}${RESET}   (exit: Ctrl+])"
+    echo ""
+    echo "  Steps: language → network (DHCP) → disk (default) → user=${VM_USER} → OpenSSH=YES → Done"
+    echo ""
+    confirm "Press Y once Ubuntu installation is complete and VM has rebooted" || exit 0
   fi
-
-  # Check if Ubuntu is already installed (SSH reachable = installation done)
-  local vm_ip; vm_ip="$(_resolve_vm_ip)"
-  if _ssh_alive "$vm_ip" 2>/dev/null; then
-    ok "VM SSH already reachable at ${vm_ip} — Ubuntu installation appears complete."
-    VM_SSH_HOST="$vm_ip"
-    return
-  fi
-
-  # Ubuntu installer is likely still running — guide user
-  echo ""
-  echo -e "${YELLOW}  The Ubuntu installer is running inside the VM.${RESET}"
-  echo "  Connect to the installer console now and complete the installation:"
-  echo ""
-  echo -e "    ${BOLD}sudo virsh console ${VM_NAME}${RESET}"
-  echo ""
-  echo "  Installation steps to complete:"
-  echo "    1. Language / keyboard → continue"
-  echo "    2. Network — leave DHCP for now (phase3 will set static IP)"
-  echo "    3. Storage — use entire disk (default)"
-  echo "    4. Create user: name=${VM_USER}  server-name=${VM_HOSTNAME}"
-  echo "    5. Install OpenSSH server → YES"
-  echo "    6. No snaps needed → Done"
-  echo "    7. Wait for 'Installation complete!' → Reboot"
-  echo ""
-  echo -e "  To exit the console after install: ${BOLD}Ctrl+]${RESET}"
-  echo ""
-  confirm "Press Y once Ubuntu installation is complete and VM has rebooted" || exit 0
 }
 
 # =============================================================================
@@ -193,21 +184,32 @@ wait_for_ssh() {
   section "Step 2 — Wait for VM SSH"
 
   VM_SSH_HOST="$(_resolve_vm_ip)"
-  info "Polling SSH at ${VM_SSH_USER}@${VM_SSH_HOST} (up to 5 min)..."
+  # Autoinstall takes ~10-15 min; manual install confirmed before this call
+  local max=180  # 15 min (180 x 5s)
+  [ "${VM_AUTOINSTALL:-yes}" != "yes" ] && max=60
 
-  local attempts=0 max=60
+  info "Polling SSH at ${VM_SSH_USER}@${VM_SSH_HOST} (up to $(( max * 5 / 60 )) min)..."
+
+  local attempts=0
   while [ $attempts -lt $max ]; do
     if _ssh_alive "$VM_SSH_HOST"; then
+      echo ""
       ok "VM SSH reachable at ${VM_SSH_HOST}"
       return
     fi
     (( attempts++ ))
-    printf "\r  Waiting... (%d/%d)" "$attempts" "$max"
+    if (( attempts % 12 == 0 )); then
+      local elapsed=$(( attempts * 5 / 60 ))
+      local vm_state; vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
+      printf "\r  [%d min] VM state: %-12s  waiting for SSH...    " "$elapsed" "$vm_state"
+    else
+      printf "\r  Waiting... (%d/%d)    " "$attempts" "$max"
+    fi
     sleep 5
   done
   echo ""
-  err "VM SSH not reachable after 5 minutes."
-  ask "Enter VM IP/hostname manually (or press Enter to retry): "; read -r _manual
+  err "VM SSH not reachable after $(( max * 5 / 60 )) minutes."
+  ask "Enter VM IP/hostname manually (or press Enter to retry once more): "; read -r _manual
   if [ -n "$_manual" ]; then
     VM_SSH_HOST="$_manual"
     _ssh_alive "$VM_SSH_HOST" || { err "Still not reachable at ${VM_SSH_HOST}"; exit 1; }
@@ -216,6 +218,7 @@ wait_for_ssh() {
     wait_for_ssh  # recurse once
   fi
 }
+
 
 # =============================================================================
 # Step 3–8: Remote configuration (runs inside VM via SSH)
@@ -227,6 +230,7 @@ run_remote_setup() {
 
   ssh -tt -o StrictHostKeyChecking=accept-new "${VM_SSH_USER}@${VM_SSH_HOST}" \
     "VM_NAME='${VM_NAME}' \
+     VM_AUTOINSTALL='${VM_AUTOINSTALL:-yes}' \
      VM_TUNNEL_HOST='${VM_TUNNEL_HOST}' \
      VM_TUNNEL_NAME='${VM_TUNNEL_NAME}' \
      VM_STATIC_IP='${VM_STATIC_IP}' \
