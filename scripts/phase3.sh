@@ -228,12 +228,7 @@ ensure_vm_running() {
   fi
 
   if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-    info "Attaching to VM console — Ubuntu autoinstall output will stream here."
-    info "Press ${BOLD}Ctrl+]${RESET} to detach (script will continue to SSH check)."
-    echo ""
-    virsh console "$VM_NAME" || true
-    echo ""
-    info "Console detached. Continuing to SSH check..."
+    info "Ubuntu autoinstall runs silently (~10-15 min). SSH poll will catch it when done."
   else
     # Manual install — check if already SSH-reachable (install may already be done)
     local vm_ip; vm_ip="$(_resolve_vm_ip)"
