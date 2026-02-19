@@ -86,6 +86,18 @@ detect_system() {
   echo "  Kernel  : ${SYS_KERNEL}"
   echo "  Boot    : ${SYS_BOOT_MODE}"
   echo "  IOMMU   : ${SYS_VTXD}"
+
+  # SR-IOV kernel compatibility check
+  SRIOV_DKMS_BUILT="$(dkms status 2>/dev/null | grep "i915-sriov" | awk -F'[, ]+' '{print $2}' | head -1 || true)"
+  if [ -n "${SRIOV_DKMS_BUILT:-}" ]; then
+    if [ "${SRIOV_DKMS_BUILT}" = "${SYS_KERNEL}" ]; then
+      echo "  SR-IOV  : i915-sriov-dkms built for running kernel ✓ (${SYS_KERNEL})"
+    else
+      echo "  SR-IOV  : ⚠ dkms built for ${SRIOV_DKMS_BUILT} — running ${SYS_KERNEL} (excluded, will boot ${SRIOV_DKMS_BUILT} after reboot)"
+    fi
+  else
+    echo "  SR-IOV  : i915-sriov-dkms not installed (step 6 will install)"
+  fi
 }
 
 check_requirements() {
@@ -133,6 +145,18 @@ check_requirements() {
     ok_count=$((ok_count+1))
   else
     echo -e "  ${YELLOW}!${RESET} VT-d not confirmed — BIOS: enable 'Intel VT-d (Virtualization for Directed I/O)'"
+    warn_count=$((warn_count+1))
+  fi
+
+  # SR-IOV kernel compatibility
+  SRIOV_COMPAT_KERNEL="$(dkms status 2>/dev/null | grep "i915-sriov" | awk -F'[, ]+' '{print $2}' | head -1 || true)"
+  if [ -z "${SRIOV_COMPAT_KERNEL:-}" ]; then
+    echo -e "  ${CYAN}i${RESET} i915-sriov-dkms: not yet installed (step 6)"
+  elif [ "${SRIOV_COMPAT_KERNEL}" = "$(uname -r)" ]; then
+    echo -e "  ${GREEN}✓${RESET} i915-sriov-dkms built for running kernel ($(uname -r))"
+    ok_count=$((ok_count+1))
+  else
+    echo -e "  ${YELLOW}!${RESET} i915-sriov-dkms built for ${SRIOV_COMPAT_KERNEL}, running $(uname -r) — step 6 will set ${SRIOV_COMPAT_KERNEL} as default boot"
     warn_count=$((warn_count+1))
   fi
 
