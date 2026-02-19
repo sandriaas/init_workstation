@@ -144,11 +144,19 @@ All Phase 1 setup is handled by a single idempotent script.
 | Step | What it does |
 |------|--------------|
 | **1. Packages & Services** | System update, installs required packages + virt stack (`qemu/libvirt/virt-manager/cockpit`), enables sshd/docker/fail2ban/libvirtd/cockpit, adds user to docker/libvirt/kvm groups |
-| **2. IOMMU** | Detects bootloader (Limine/GRUB/systemd-boot), patches kernel cmdline with `intel_iommu=on iommu=pt i915.enable_guc=3 i915.max_vfs=7 module_blacklist=xe`, regenerates bootloader |
-| **3. Disable Sleep** | Masks all sleep/suspend/hibernate targets so the server never suspends |
-| **4. Static IP** | Detects interface + gateway, asks for desired static IP/gateway/DNS, applies via NetworkManager or Netplan |
-| **5. SSH Setup** | Ensures sshd is active, explicitly enables password authentication |
-| **6. Cloudflare SSH Tunnel** | Asks tunnel hostname + name + auth (browser login or API token), creates tunnel, DNS CNAME, installs systemd service |
+| **2. Disable Sleep** | Masks all sleep/suspend/hibernate targets so the server never suspends |
+| **3. Static IP** | Detects interface + gateway, asks for desired static IP/gateway/DNS, applies via NetworkManager or Netplan |
+| **4. SSH Setup** | Ensures sshd is active, explicitly enables password authentication |
+| **5. Cloudflare SSH Tunnel** | Asks tunnel hostname + name + auth (browser login or API token), creates tunnel, DNS CNAME, installs systemd service (After=network-online.target) |
+| **6. Intel iGPU SR-IOV + IOMMU** | Prompts GPU gen → installs `i915-sriov-dkms` → configures vfio-pci + udev rules → sets VF count at boot → rebuilds initramfs → patches kernel cmdline (`intel_iommu=on iommu=pt i915.enable_guc=3 i915.max_vfs=N`) → runs bootloader update |
+
+> **⚠ Kernel compatibility note:** `i915-sriov-dkms` has a `BUILD_EXCLUSIVE_KERNEL` constraint and may not build for the latest mainline kernel. If the module is excluded from your running kernel, the script **automatically detects** this and sets the compatible kernel (e.g. LTS) as the default boot entry across Limine, GRUB, and systemd-boot. You'll see a warning like:
+> ```
+> [WARN] i915-sriov-dkms is NOT built for running kernel (6.19.x)
+> [WARN] It is built for: 6.18.x-lts — SR-IOV requires booting that kernel.
+> [OK]  Limine default boot set to: *lts (kernel 6.18.x-lts)
+> ```
+> After reboot the system will run the compatible kernel and SR-IOV will be active.
 
 ### Run — full setup
 
@@ -163,6 +171,9 @@ sudo reboot
 
 # After reboot verify:
 cat /proc/cmdline | grep iommu      # → intel_iommu=on iommu=pt
+cat /proc/cmdline | grep i915       # → i915.enable_guc=3 i915.max_vfs=7
+dkms status                         # → i915-sriov-dkms/..., <kernel>: installed
+cat /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs  # → 7
 docker run --rm hello-world         # → works without sudo
 systemctl status cloudflared        # → active (running)
 ```

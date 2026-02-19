@@ -580,27 +580,67 @@ EOF
       ;;
   esac
 
-  # Check if dkms built for running kernel — if excluded, set LTS as default boot
+  # Check if dkms built for running kernel — if excluded, set compatible kernel as default boot
   RUNNING_KERNEL="$(uname -r)"
   if ! dkms status 2>/dev/null | grep -q "i915-sriov.*${RUNNING_KERNEL}"; then
-    # Find an LTS kernel the module DID build for
-    LTS_KERNEL="$(dkms status 2>/dev/null | grep "i915-sriov" | awk -F'[, ]+' '{print $2}' | head -1)"
-    if [ -n "${LTS_KERNEL:-}" ]; then
+    # Find a kernel the module DID build for
+    COMPAT_KERNEL="$(dkms status 2>/dev/null | grep "i915-sriov" | awk -F'[, ]+' '{print $2}' | head -1)"
+    if [ -n "${COMPAT_KERNEL:-}" ]; then
       warn "i915-sriov-dkms is NOT built for running kernel (${RUNNING_KERNEL})."
-      warn "It is built for: ${LTS_KERNEL} — SR-IOV requires booting that kernel."
+      warn "It is built for: ${COMPAT_KERNEL} — SR-IOV requires booting that kernel."
+      warn "The system will be configured to boot ${COMPAT_KERNEL} by default."
       if [ -f /etc/default/limine ]; then
-        # Set default boot to lts entry
-        if ! grep -q "^DEFAULT_ENTRY=" /etc/default/limine 2>/dev/null; then
-          echo 'DEFAULT_ENTRY="*lts"' | sudo tee -a /etc/default/limine >/dev/null
+        # Derive Limine entry name from kernel version: strip distro suffix after last '-'
+        # e.g. 6.18.12-2-cachyos-lts → linux-cachyos-lts; fallback to *lts if name contains lts
+        if echo "$COMPAT_KERNEL" | grep -qi "lts"; then
+          LIMINE_ENTRY="*lts"
         else
-          sudo sed -i 's|^DEFAULT_ENTRY=.*|DEFAULT_ENTRY="*lts"|' /etc/default/limine
+          # Use kernel package name by stripping version prefix
+          LIMINE_ENTRY="*$(echo "$COMPAT_KERNEL" | sed 's/^[0-9.-]*-[0-9]*-//')"
+        fi
+        if ! grep -q "^DEFAULT_ENTRY=" /etc/default/limine 2>/dev/null; then
+          echo "DEFAULT_ENTRY=\"${LIMINE_ENTRY}\"" | sudo tee -a /etc/default/limine >/dev/null
+        else
+          sudo sed -i "s|^DEFAULT_ENTRY=.*|DEFAULT_ENTRY=\"${LIMINE_ENTRY}\"|" /etc/default/limine
         fi
         sudo limine-update
-        ok "Limine default boot set to LTS kernel (${LTS_KERNEL})."
+        ok "Limine default boot set to: ${LIMINE_ENTRY} (kernel ${COMPAT_KERNEL})."
+      elif [ -f /etc/default/grub ]; then
+        # GRUB: set GRUB_DEFAULT to the exact menuentry matching the compat kernel
+        # Find the menuentry index by grepping grub.cfg for the kernel version
+        GRUB_CFG="/boot/grub/grub.cfg"
+        [ -f /boot/grub2/grub.cfg ] && GRUB_CFG="/boot/grub2/grub.cfg"
+        GRUB_IDX="$(grep -n "menuentry\|linux.*${COMPAT_KERNEL}" "$GRUB_CFG" 2>/dev/null \
+          | grep "linux.*${COMPAT_KERNEL}" | head -1 | cut -d: -f1 || true)"
+        if [ -n "${GRUB_IDX:-}" ]; then
+          sudo sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"${COMPAT_KERNEL}\"|" /etc/default/grub
+          case "$OS" in
+            arch)           sudo grub-mkconfig -o /boot/grub/grub.cfg ;;
+            ubuntu|proxmox) sudo update-grub ;;
+            fedora)         sudo grub2-mkconfig -o /boot/grub2/grub.cfg ;;
+          esac
+          ok "GRUB default boot set to kernel: ${COMPAT_KERNEL}."
+        else
+          warn "Could not auto-set GRUB default — set GRUB_DEFAULT manually to: ${COMPAT_KERNEL}"
+        fi
+      elif [ -d /boot/loader/entries ]; then
+        # systemd-boot: set the default entry to the matching .conf file
+        SD_ENTRY="$(grep -rl "${COMPAT_KERNEL}" /boot/loader/entries/ 2>/dev/null | head -1 | xargs basename 2>/dev/null || true)"
+        if [ -n "${SD_ENTRY:-}" ]; then
+          sudo sed -i "s|^default .*|default ${SD_ENTRY}|" /boot/loader/loader.conf 2>/dev/null || \
+            echo "default ${SD_ENTRY}" | sudo tee /boot/loader/loader.conf >/dev/null
+          ok "systemd-boot default set to: ${SD_ENTRY}"
+        else
+          warn "Could not auto-set systemd-boot default — set 'default' in /boot/loader/loader.conf manually."
+        fi
+      else
+        warn "Unknown bootloader — manually set default kernel to: ${COMPAT_KERNEL}"
       fi
-      warn "After reboot you will be on ${LTS_KERNEL} — SR-IOV will be active."
+      warn "⚠  SR-IOV NOTE: After reboot you will run ${COMPAT_KERNEL}. SR-IOV will be active."
+      warn "   i915-sriov-dkms BUILD_EXCLUSIVE_KERNEL excludes kernel ${RUNNING_KERNEL}."
+      warn "   See: https://github.com/strongtz/i915-sriov-dkms for supported kernel range."
     else
-      warn "i915-sriov-dkms built for no kernel yet — check dkms status after reboot."
+      warn "i915-sriov-dkms built for no kernel yet — check 'dkms status' after reboot."
     fi
   fi
   echo "vfio-pci" | sudo tee /etc/modules-load.d/vfio.conf >/dev/null
