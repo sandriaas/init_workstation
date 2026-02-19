@@ -49,8 +49,12 @@ function Install-Websocat {
     $binDir = "$env:USERPROFILE\bin"
     if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir | Out-Null }
     $dest = "$binDir\websocat.exe"
-    $url  = "https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-pc-windows-msvc.exe"
-    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+    # Resolve actual asset URL via API (avoids redirect issues in PS 5.1)
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/vi/websocat/releases/latest" -UseBasicParsing
+    $asset   = $release.assets | Where-Object { $_.name -like "*x86_64*windows*msvc*" }
+    $url     = $asset.browser_download_url
+    Info "Downloading websocat from $url ..."
+    (New-Object System.Net.WebClient).DownloadFile($url, $dest)
     # Add ~/bin to user PATH if not already there
     $userPath = [System.Environment]::GetEnvironmentVariable("PATH","User")
     if ($userPath -notlike "*$binDir*") {
