@@ -93,8 +93,8 @@ function Setup-SshConfig {
     }
 
     # Resolve full path to websocat.exe for ProxyCommand
-    $websocat = (Get-Command websocat -ErrorAction SilentlyContinue)?.Source
-    if (-not $websocat) { $websocat = "$env:USERPROFILE\bin\websocat.exe" }
+    $ws = Get-Command websocat -ErrorAction SilentlyContinue
+    $websocat = if ($ws) { $ws.Source } else { "$env:USERPROFILE\bin\websocat.exe" }
 
     $entry = @"
 
