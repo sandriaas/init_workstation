@@ -201,7 +201,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/m
 ### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.ps1 | iex
+irm "https://api.github.com/repos/sandriaas/init_workstation/contents/scripts/phase1-client.ps1" | % { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_.content)) } | iex
 ```
 
 > Installs Scoop, winget, websocat, and OpenSSH client automatically.
