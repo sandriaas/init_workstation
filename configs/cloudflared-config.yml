@@ -1,0 +1,7 @@
+tunnel: 62e14bed-9dcc-4c39-80d3-a4bcf257b466
+credentials-file: /home/sandriaas/.cloudflared/62e14bed-9dcc-4c39-80d3-a4bcf257b466.json
+
+ingress:
+  - hostname: b8sqa0n0v48o.easyrentbali.com
+    service: ssh://localhost:22
+  - service: http_status:404

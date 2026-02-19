@@ -1,0 +1,13 @@
+
+# MiniPC via Cloudflare Tunnel
+# Option A: websocat (no cloudflared needed on client — just install websocat)
+Host minipc
+  HostName b8sqa0n0v48o.easyrentbali.com
+  ProxyCommand websocat -E --binary - wss://%h
+  User sandriaas
+
+# Option B: cloudflared (handles Cloudflare Access JWT auth if you add an Access policy later)
+Host minipc-cf
+  HostName b8sqa0n0v48o.easyrentbali.com
+  ProxyCommand cloudflared access ssh --hostname %h
+  User sandriaas
