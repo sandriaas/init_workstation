@@ -1237,85 +1237,100 @@ test_vm_ssh() {
 print_summary() {
   source_vm_conf
   local HOST_IP; HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  local VM_IP; VM_IP="${VM_STATIC_IP%/*}"
+  local VM_IP="${VM_STATIC_IP%/*}"
+  local VM_STATE; VM_STATE="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
+  local SSH_OK=false
+  [[ "${VM_SSH_RESULT:-}" == "✓"* ]] && SSH_OK=true
 
   echo ""
   echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
-  echo -e "${BOLD}║                    PHASE 2 COMPLETE ✓                       ║${RESET}"
+  echo -e "${BOLD}║                  ✓  PHASE 2 COMPLETE                        ║${RESET}"
   echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
+
+  # ── VM ──────────────────────────────────────────────────────────────────────
   echo ""
-  echo -e "${BOLD}  ── VM Configuration ──────────────────────────────────────${RESET}"
-  printf "  %-18s %s\n" "Name:"        "$VM_NAME"
-  printf "  %-18s %s\n" "Hostname:"    "$VM_HOSTNAME"
-  printf "  %-18s %s\n" "User:"        "$VM_USER"
-  printf "  %-18s %s vCPU  /  %s MB RAM\n" "Resources:" "$VM_VCPUS" "$VM_RAM_MB"
-  printf "  %-18s %s  (%s GB,  %s)\n"  "Disk:" "$VM_DISK_PATH" "$VM_DISK_GB" "$VM_DISK_FORMAT"
-  printf "  %-18s %s  (machine=%s, firmware=%s)\n" "Machine:" "$VM_CPU_MODEL" "$VM_MACHINE_TYPE" "$VM_FIRMWARE"
-  printf "  %-18s %s\n" "OS Variant:"  "$VM_OS_VARIANT"
-  echo ""
-  echo -e "${BOLD}  ── Network ─────────────────────────────────────────────────${RESET}"
-  printf "  %-18s %s  (physical LAN)\n"       "Host IP:"    "$HOST_IP"
-  printf "  %-18s %s  (libvirt NAT)\n"        "VM IP:"      "$VM_IP"
-  printf "  %-18s %s → %s\n"                  "Shared:"     "$SHARED_DIR" "$SHARED_TAG"
-  echo ""
-  echo -e "${BOLD}  ── GPU Passthrough ─────────────────────────────────────────${RESET}"
-  printf "  %-18s %s  (driver: %s, gen %s)\n" "GPU:"        "$GPU_PCI_ID" "$GPU_DRIVER" "$GPU_GEN"
-  printf "  %-18s %s  (x-igd-lpc=%s)\n"       "VF count:"   "$GPU_VF_COUNT" "$GPU_IGD_LPC"
-  printf "  %-18s %s\n"                        "ROM:"        "${GPU_ROM_PATH}"
-  echo ""
-  echo -e "${BOLD}  ── Cloudflare Tunnels ───────────────────────────────────────${RESET}"
-  printf "  %-20s %s\n" "Host hostname:"   "${HOST_TUNNEL_HOST}"
-  [ -n "${HOST_TUNNEL_NAME:-}" ] && printf "  %-20s %s\n" "Host tunnel name:" "${HOST_TUNNEL_NAME}"
-  [ -n "${HOST_TUNNEL_ID:-}" ]   && printf "  %-20s %s\n" "Host tunnel ID:"   "${HOST_TUNNEL_ID}"
-  printf "  %-20s %s\n" "Host connect:"    "ssh ${CURRENT_USER}@${HOST_TUNNEL_HOST}"
-  echo ""
-  printf "  %-20s %s\n" "VM hostname:"     "${VM_TUNNEL_HOST}"
-  printf "  %-20s %s\n" "VM tunnel name:"  "${VM_TUNNEL_NAME}"
-  printf "  %-20s %s\n" "VM connect:"      "ssh ${VM_USER}@${VM_TUNNEL_HOST}  (after phase 3)"
-  echo ""
-  echo -e "${BOLD}  ── Files ───────────────────────────────────────────────────${RESET}"
-  printf "  %-18s %s\n" "VM conf:"       "$VM_CONF"
-  printf "  %-18s %s\n" "State:"         "${VM_CONF_DIR}/.state"
-  [ -f "${VM_CONF_DIR}/${VM_NAME}-seed.iso" ] && \
-    printf "  %-18s %s\n" "Seed ISO:"    "${VM_CONF_DIR}/${VM_NAME}-seed.iso"
-  echo ""
-  echo -e "${BOLD}  ── Network Diagram ─────────────────────────────────────────${RESET}"
-  echo "  Internet ──cloudflare──▶ Host ($HOST_IP)"
-  echo "                               └──virbr0 NAT──▶ VM ($VM_IP)"
-  echo "                                    VM tunnel: ${VM_TUNNEL_HOST}"
-  echo ""
-  echo -e "${BOLD}  ── VM Status ────────────────────────────────────────────────${RESET}"
-  virsh list --all 2>/dev/null | sed 's/^/  /' || true
-  echo ""
-  echo -e "${BOLD}  ── SSH Access ───────────────────────────────────────────────${RESET}"
-  printf "  %-20s %s\n" "SSH status:"   "${VM_SSH_RESULT:-not tested}"
-  printf "  %-20s %s\n" "Direct (LAN):" "ssh ${VM_USER}@${VM_SSH_IP:-${VM_STATIC_IP%/*}}"
-  echo ""
-  echo -e "${BOLD}  ── SSH Access ───────────────────────────────────────────────${RESET}"
-  printf "  %-20s %s\n" "SSH status:"  "${VM_SSH_RESULT:-not tested}"
-  printf "  %-20s %s\n" "Direct (LAN):" "ssh ${VM_USER}@${VM_SSH_IP:-$VM_IP}"
-  printf "  %-20s %s\n" "Via tunnel:"   "ssh ${VM_USER}@${VM_TUNNEL_HOST}  (after phase 3)"
-  printf "  %-20s %s\n" "Console:"      "sudo virsh console ${VM_NAME}  (Ctrl+] to exit)"
-  echo ""
-  echo -e "${YELLOW}  ── Next Steps ───────────────────────────────────────────────${RESET}"
-  if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-    echo "  Ubuntu is installing AUTOMATICALLY (unattended, ~10-15 min)."
-    echo "  Optional — watch progress:  sudo virsh console ${VM_NAME}  (exit: Ctrl+])"
-    echo ""
-    echo "  Run Phase 3 when ready (it will wait for SSH automatically):"
+  echo -e "${BOLD}  ┌─ VM ────────────────────────────────────────────────────────${RESET}"
+  printf "  │  %-16s %s\n"  "Name:"        "$VM_NAME  ($VM_HOSTNAME)"
+  printf "  │  %-16s %s\n"  "User:"        "$VM_USER"
+  printf "  │  %-16s %s vCPU  •  %s MB RAM  •  %s GB disk\n" \
+                            "Resources:"   "$VM_VCPUS" "$VM_RAM_MB" "$VM_DISK_GB"
+  printf "  │  %-16s %s  •  machine=%s  •  %s\n" \
+                            "CPU / Type:"  "$VM_CPU_MODEL" "$VM_MACHINE_TYPE" "$VM_OS_VARIANT"
+  printf "  │  %-16s %s  •  firmware=%s\n" \
+                            "Disk:"        "$VM_DISK_PATH" "${VM_FIRMWARE:-uefi}"
+  printf "  │  %-16s "      "State:"
+  if [ "$VM_STATE" = "running" ]; then
+    echo -e "${GREEN}${VM_STATE}${RESET}"
   else
-    echo "  1. Complete Ubuntu installer:"
-    echo "       sudo virsh console ${VM_NAME}"
-    echo ""
-    echo "  2. Run Phase 3 after Ubuntu finishes:"
+    echo -e "${YELLOW}${VM_STATE}${RESET}"
   fi
-  echo "       sudo bash scripts/phase3.sh"
-  echo "     or:"
-  echo "       bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3.sh)"
+
+  # ── Network ─────────────────────────────────────────────────────────────────
   echo ""
-  echo "  Verify with:"
-  echo "       bash scripts/check.sh"
+  echo -e "${BOLD}  ├─ Network ──────────────────────────────────────────────────${RESET}"
+  printf "  │  %-16s %s\n"  "Host IP:"     "$HOST_IP  (LAN)"
+  printf "  │  %-16s %s  (libvirt NAT, iface=%s)\n" \
+                            "VM IP:"        "$VM_IP" "${VM_NET_IFACE:-enp1s0}"
+  printf "  │  %-16s %s  →  %s  (virtiofs)\n" \
+                            "Shared dir:"   "$SHARED_DIR" "$SHARED_TAG"
+  echo   "  │"
+  echo   "  │  Internet ──cloudflare──▶ host ($HOST_IP)"
+  echo   "  │                └──virbr0──▶ vm ($VM_IP)"
+
+  # ── SSH ─────────────────────────────────────────────────────────────────────
   echo ""
+  echo -e "${BOLD}  ├─ SSH Access ───────────────────────────────────────────────${RESET}"
+  printf "  │  %-16s " "Status:"
+  if $SSH_OK; then
+    echo -e "${GREEN}${VM_SSH_RESULT}${RESET}"
+  else
+    echo -e "${YELLOW}${VM_SSH_RESULT:-not tested}${RESET}"
+  fi
+  printf "  │  %-16s %s\n"  "Direct (LAN):" "ssh ${VM_USER}@${VM_SSH_IP:-$VM_IP}"
+  printf "  │  %-16s %s\n"  "Via tunnel:"   "ssh ${VM_USER}@${VM_TUNNEL_HOST}  ← after phase 3"
+  printf "  │  %-16s %s\n"  "Console:"      "sudo virsh console ${VM_NAME}  (Ctrl+] to exit)"
+
+  # ── GPU ─────────────────────────────────────────────────────────────────────
+  if [ "${GPU_PASSTHROUGH:-no}" = "yes" ]; then
+    echo ""
+    echo -e "${BOLD}  ├─ GPU Passthrough ──────────────────────────────────────────${RESET}"
+    printf "  │  %-16s %s  (driver=%s, gen%s, VFs=%s)\n" \
+                              "GPU:"        "$GPU_PCI_ID" "$GPU_DRIVER" "$GPU_GEN" "$GPU_VF_COUNT"
+    printf "  │  %-16s %s\n" "ROM:"        "${GPU_ROM_PATH}"
+    printf "  │  %-16s %s\n" "IGD LPC:"    "${GPU_IGD_LPC}"
+  fi
+
+  # ── Cloudflare ───────────────────────────────────────────────────────────────
+  echo ""
+  echo -e "${BOLD}  ├─ Cloudflare Tunnels ───────────────────────────────────────${RESET}"
+  printf "  │  %-16s %s\n"  "Host tunnel:"  "ssh ${CURRENT_USER}@${HOST_TUNNEL_HOST}"
+  printf "  │  %-16s %s\n"  "VM tunnel:"    "ssh ${VM_USER}@${VM_TUNNEL_HOST}  ← after phase 3"
+  [ -n "${HOST_TUNNEL_ID:-}" ] && \
+    printf "  │  %-16s %s\n" "Tunnel ID:"   "${HOST_TUNNEL_ID}"
+
+  # ── Files ────────────────────────────────────────────────────────────────────
+  echo ""
+  echo -e "${BOLD}  ├─ Files ────────────────────────────────────────────────────${RESET}"
+  printf "  │  %-16s %s\n"  "VM conf:"      "$VM_CONF"
+  printf "  │  %-16s %s\n"  "Seed ISO:"     "${VM_CONF_DIR}/${VM_NAME}-seed.iso"
+  printf "  │  %-16s %s\n"  "State:"        "${VM_CONF_DIR}/.state"
+  printf "  │  %-16s %s\n"  "Serial log:"   "/var/log/libvirt/qemu/${VM_NAME}-serial.log"
+
+  # ── Next Steps ───────────────────────────────────────────────────────────────
+  echo ""
+  echo -e "${BOLD}  └─ Next Steps ───────────────────────────────────────────────${RESET}"
+  if $SSH_OK; then
+    echo -e "     ${GREEN}VM is ready. Run Phase 3 to configure cloudflared tunnel + SSH:${RESET}"
+  else
+    echo -e "     ${YELLOW}SSH not yet confirmed. VM may still be booting.${RESET}"
+    echo   "     Check:   sudo virsh console ${VM_NAME}"
+    echo   "     Then run Phase 3:"
+  fi
+  echo   "       sudo bash scripts/phase3.sh"
+  echo   "     or:"
+  echo   "       bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3.sh)"
+  echo ""
+
   _snap_summary
 }
 
