@@ -618,25 +618,31 @@ main() {
   wait_for_ssh
 
   # ── Always prompt for tunnel token + hostname (host-side, before any SSH heredoc) ──
-  echo ""
-  echo "  ── VM Tunnel Hostname ──────────────────────────────────"
+  # For token-based tunnels: public hostname is set in the Cloudflare dashboard.
+  # We must ask the user for it — random generation would never match Cloudflare.
   local _domain="${HOST_TUNNEL_DOMAIN:-${VM_TUNNEL_HOST#*.}}"
-  local _new_suffix; _new_suffix="vm-$(tr -dc a-z0-9 </dev/urandom 2>/dev/null | head -c 8; true)"
-  echo "  Domain:              ${_domain}"
-  echo "  Auto-generated:      ${_new_suffix}.${_domain}"
-  read -r -p "  Subdomain [${_new_suffix}]: " _input_sub
-  local _final_sub="${_input_sub:-${_new_suffix}}"
-  VM_TUNNEL_HOST="${_final_sub}.${_domain}"
-  sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
-  ok "VM tunnel hostname → ${VM_TUNNEL_HOST}"
+  local _cur_sub="${VM_TUNNEL_HOST%%.*}"   # current subdomain from conf
 
   echo ""
   echo "  ── Cloudflare Tunnel Token ────────────────────────────────"
-  echo "  Get from: dash.cloudflare.com → Zero Trust → Networks → Tunnels"
-  echo "  Select your tunnel → Configure → Install connector → copy token"
+  echo "  dash.cloudflare.com → Zero Trust → Networks → Tunnels"
+  echo "  Select tunnel → Configure → Install connector → copy token"
   echo ""
   local VM_TUNNEL_TOKEN="${VM_TUNNEL_TOKEN:-}"
   read -r -p "  Paste tunnel token (Enter to skip): " VM_TUNNEL_TOKEN
+  echo ""
+
+  echo "  ── VM Tunnel Public Hostname ────────────────────────────"
+  echo "  Domain: ${_domain}"
+  echo "  Enter the subdomain you configured in the Cloudflare dashboard"
+  echo "  for this tunnel's SSH public hostname."
+  echo "  Current in conf: ${_cur_sub}"
+  echo ""
+  read -r -p "  Subdomain [${_cur_sub}]: " _input_sub
+  local _final_sub="${_input_sub:-${_cur_sub}}"
+  VM_TUNNEL_HOST="${_final_sub}.${_domain}"
+  sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
+  ok "VM tunnel hostname → ${VM_TUNNEL_HOST}"
   echo ""
 
   # Export so run_remote_setup and the step-8b-only path can use them
