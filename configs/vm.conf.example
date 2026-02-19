@@ -1,6 +1,72 @@
-# vm.conf.example — reference defaults for configs/vm.conf
-# Copy to configs/vm.conf and adjust, or let phase2.sh generate it.
-# configs/vm.conf is gitignored (runtime-generated).
+# vm.conf.example — reference defaults for generated-vm/${VM_NAME}.conf
+# Copy to generated-vm/server-vm.conf or let phase2.sh generate it.
+
+# ── Identity ──────────────────────────────────────────────────────────────────
+VM_NAME="server-vm"
+VM_HOSTNAME="ubuntu-server"
+VM_USER="youruser"
+
+# ── Machine / Firmware ────────────────────────────────────────────────────────
+VM_MACHINE_TYPE="pc"         # pc (i440fx) for IGD passthrough; q35 otherwise
+VM_FIRMWARE="uefi"           # uefi (OVMF) or bios
+VM_CPU_MODEL="host-passthrough"
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+VM_RAM_MB="8192"
+VM_VCPUS="8"
+
+# ── Disk ──────────────────────────────────────────────────────────────────────
+VM_DISK_GB="32"
+VM_DISK_PATH="/var/lib/libvirt/images/server-vm.qcow2"
+VM_DISK_FORMAT="qcow2"
+VM_DISK_BUS="virtio"
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+VM_OS_VARIANT="ubuntu24.04"
+VM_ISO_PATH="$HOME/iso/ubuntu-24.04.3-live-server-amd64.iso"
+VM_ISO_URL="https://releases.ubuntu.com/24.04.3/ubuntu-24.04.3-live-server-amd64.iso"
+VM_BOOT_ORDER="hd,cdrom"
+
+# ── Network ───────────────────────────────────────────────────────────────────
+VM_NET_TYPE="network"
+VM_NET_SOURCE="default"      # libvirt NAT network name
+VM_NET_MODEL="virtio"
+VM_STATIC_IP="192.168.122.50/24"
+VM_GATEWAY="192.168.122.1"
+VM_DNS="1.1.1.1,8.8.8.8"
+VM_SSH_PORT="22"
+
+# ── Display / Console ─────────────────────────────────────────────────────────
+VM_GRAPHICS="none"           # none = headless (passthrough); spice or vnc for display
+VM_VIDEO="none"              # none for passthrough; virtio/vga otherwise
+VM_CONSOLE="pty,target_type=serial"
+
+# ── Features ──────────────────────────────────────────────────────────────────
+VM_FEATURES="acpi,apic"
+VM_CLOCK="utc"
+VM_AUTOSTART="yes"
+
+# ── Shared Storage ────────────────────────────────────────────────────────────
+SHARED_DIR="$HOME/server-data"
+SHARED_TAG="hostshare"
+
+# ── GPU / SR-IOV Passthrough ──────────────────────────────────────────────────
+GPU_PASSTHROUGH="yes"
+GPU_GEN="9"                  # See scripts/phase2.sh GPU gen table
+GPU_PCI_ID="0000:00:02.0"
+GPU_VF_COUNT="7"
+GPU_DRIVER="i915"
+GPU_ROM_FILE="ADL-H_RPL-H_GOPv21_igd.rom"
+GPU_ROM_URL="https://github.com/LongQT-sea/intel-igpu-passthru/releases/download/v0.1/ADL-H_RPL-H_GOPv21_igd.rom"
+GPU_ROM_PATH="/usr/share/kvm/igd.rom"
+GPU_IGD_LPC="yes"            # Required for Ice Lake+ (Alder Lake, Tiger Lake, etc.)
+KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=7 module_blacklist=xe"
+
+# ── Cloudflare Tunnel ─────────────────────────────────────────────────────────
+HOST_TUNNEL_DOMAIN="yourdomain.com"
+HOST_TUNNEL_HOST="hostname.yourdomain.com"
+VM_TUNNEL_NAME="server-vm-ssh"
+VM_TUNNEL_HOST="vm-xxxxxxx.yourdomain.com"
 
 VM_NAME="server-vm"
 VM_HOSTNAME="ubuntu-server"
