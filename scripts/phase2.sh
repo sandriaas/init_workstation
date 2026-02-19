@@ -1055,10 +1055,19 @@ test_vm_ssh() {
   local max=180  # up to 15 min for autoinstall
   [ "${VM_AUTOINSTALL:-yes}" != "yes" ] && max=12  # 1 min if manual (already confirmed)
 
-  info "Polling SSH at ${VM_USER}@${vm_ip} (up to $(( max * 5 / 60 )) min)..."
+  # If autoinstall may still be running, attach console so user sees output
   if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-    info "VM rebooted after install — waiting for SSH to come up..."
+    local vm_state; vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
+    if [ "$vm_state" = "running" ]; then
+      info "Attaching to VM console — watch autoinstall progress. Press Ctrl+] to detach."
+      echo ""
+      sudo virsh console "$VM_NAME" || true
+      echo ""
+      info "Console detached. Checking SSH..."
+    fi
   fi
+
+  info "Polling SSH at ${VM_USER}@${vm_ip} (up to $(( max * 5 / 60 )) min)..."
 
   local attempts=0
   while [ $attempts -lt $max ]; do
