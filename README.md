@@ -2,7 +2,7 @@
 
 > Zero-to-hero workstation setup: CachyOS host → Cloudflare SSH tunnel → KVM Ubuntu VM
 
-**Machine:** Intel Core i9-12900H · 32GB RAM · CachyOS (Limine bootloader, BTRFS)
+**Machine:** Intel Core i9-12900H · 24GB RAM · CachyOS (Limine bootloader, BTRFS)
 **Domain:** `easyrentbali.com` (Cloudflare) · **User:** `sandriaas`
 
 ---

@@ -1,6 +1,6 @@
 # MiniPC Setup Log — Rev5.7.2
 
-**Machine:** Intel Core i9-12900H · 32GB RAM · CachyOS (Limine bootloader, BTRFS)
+**Machine:** Intel Core i9-12900H · 24GB RAM · CachyOS (Limine bootloader, BTRFS)
 **Date:** 2026-02-19 · **User:** `sandriaas` · **Domain:** `easyrentbali.com` (Cloudflare)
 
 ---

@@ -133,23 +133,34 @@ step_packages() {
 step_iommu() {
   section "Step 2: IOMMU Kernel Parameters"
 
+  # Skip if already active in running kernel
   if grep -q "intel_iommu=on" /proc/cmdline 2>/dev/null; then
-    ok "IOMMU already active. Skipping."; return
+    ok "IOMMU already active in running kernel. Skipping."; return
   fi
 
   confirm "Enable IOMMU (intel_iommu=on iommu=pt) in bootloader?" || { info "Skipped."; return; }
 
   if [ -f /etc/default/limine ]; then
     info "Bootloader: Limine (CachyOS)"
-    sudo cp /etc/default/limine /etc/default/limine.bak
-    sudo sed -i 's/\(KERNEL_CMDLINE\[default\]+="[^"]*\)"/\1 intel_iommu=on iommu=pt"/' /etc/default/limine
+    # Skip sed if already patched — prevents double-patch on re-run
+    if grep -q "intel_iommu=on" /etc/default/limine; then
+      ok "Already patched in /etc/default/limine — regenerating bootloader only..."
+    else
+      sudo cp /etc/default/limine /etc/default/limine.bak
+      # Patch ALL KERNEL_CMDLINE entries (default + any named kernels e.g. lts, zen, hardened)
+      sudo sed -i 's/\(KERNEL_CMDLINE\[[^]]*\]+="[^"]*\)"/\1 intel_iommu=on iommu=pt"/g' /etc/default/limine
+    fi
     sudo limine-install
-    ok "Limine updated. Active after reboot."
+    ok "Limine updated — applied to all kernel entries. Active after reboot."
 
   elif [ -f /etc/default/grub ]; then
     info "Bootloader: GRUB"
-    sudo cp /etc/default/grub /etc/default/grub.bak
-    sudo sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 intel_iommu=on iommu=pt"/' /etc/default/grub
+    if grep -q "intel_iommu=on" /etc/default/grub; then
+      ok "Already patched in /etc/default/grub — regenerating only..."
+    else
+      sudo cp /etc/default/grub /etc/default/grub.bak
+      sudo sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 intel_iommu=on iommu=pt"/' /etc/default/grub
+    fi
     case $OS in
       arch)           sudo grub-mkconfig -o /boot/grub/grub.cfg ;;
       ubuntu|proxmox) sudo update-grub ;;
@@ -158,7 +169,17 @@ step_iommu() {
     ok "GRUB updated. Active after reboot."
 
   elif [ -d /boot/loader/entries ]; then
-    warn "systemd-boot: add 'intel_iommu=on iommu=pt' manually to /boot/loader/entries/<entry>.conf"
+    # Patch all entry .conf files in /boot/loader/entries/
+    info "Bootloader: systemd-boot — patching all entries..."
+    for entry in /boot/loader/entries/*.conf; do
+      if grep -q "intel_iommu=on" "$entry" 2>/dev/null; then
+        ok "Already patched: $entry"
+      else
+        sudo sed -i 's/\(options.*\)/\1 intel_iommu=on iommu=pt/' "$entry"
+        ok "Patched: $entry"
+      fi
+    done
+
   else
     warn "Unknown bootloader — add 'intel_iommu=on iommu=pt' to kernel cmdline manually."
   fi
