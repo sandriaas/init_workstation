@@ -815,44 +815,46 @@ generate_autoinstall() {
 
   info "Generating Ubuntu autoinstall user-data → ${seed_dir}/user-data"
 
-  local pw_hash="${VM_PASSWORD_HASH:-}"
+  # Read password hash RAW from conf file — do NOT use the sourced variable because
+  # bash expands $6$salt$hash → variables ($6, $salt, $hash) stripping the prefix.
+  local pw_hash=""
+  if [ -f "$VM_CONF" ]; then
+    pw_hash="$(grep '^VM_PASSWORD_HASH=' "$VM_CONF" | head -1 | sed 's/^VM_PASSWORD_HASH=//;s/^"//;s/"$//')"
+  fi
   if [ -z "$pw_hash" ]; then
     warn "VM_PASSWORD_HASH not set — using default password 'changeme123'. Change after first login!"
-    pw_hash="$(openssl passwd -6 'changeme123' 2>/dev/null || echo '\$6\$invalid')"
+    pw_hash="$(openssl passwd -6 'changeme123' 2>/dev/null || echo 'changeme123')"
   fi
 
-  # Write user-data — split to avoid $6 in pw_hash being expanded by heredoc
-  cat > "${seed_dir}/user-data" <<EOF
-#cloud-config
-autoinstall:
-  version: 1
-  locale: en_US.UTF-8
-  keyboard:
-    layout: us
-  identity:
-    hostname: ${VM_HOSTNAME}
-    username: ${VM_USER}
-EOF
-  # Password hash contains $6$ — must not be expanded
-  printf "    password: '%s'\n" "$pw_hash" >> "${seed_dir}/user-data"
-  cat >> "${seed_dir}/user-data" <<EOF
-  ssh:
-    install-server: true
-    allow-pw: true
-    authorized-keys: []
-  storage:
-    layout:
-      name: lvm
-  packages:
-    - openssh-server
-    - curl
-    - wget
-    - net-tools
-  late-commands:
-    - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /target/etc/ssh/sshd_config
-  user-data:
-    disable_root: false
-EOF
+  # Write user-data entirely via printf to avoid ANY bash $ expansion
+  {
+    printf '#cloud-config\n'
+    printf 'autoinstall:\n'
+    printf '  version: 1\n'
+    printf '  locale: en_US.UTF-8\n'
+    printf '  keyboard:\n'
+    printf '    layout: us\n'
+    printf '  identity:\n'
+    printf '    hostname: %s\n'  "${VM_HOSTNAME}"
+    printf '    username: %s\n'  "${VM_USER}"
+    printf '    password: "%s"\n' "${pw_hash}"
+    printf '  ssh:\n'
+    printf '    install-server: true\n'
+    printf '    allow-pw: true\n'
+    printf '    authorized-keys: []\n'
+    printf '  storage:\n'
+    printf '    layout:\n'
+    printf '      name: lvm\n'
+    printf '  packages:\n'
+    printf '    - openssh-server\n'
+    printf '    - curl\n'
+    printf '    - wget\n'
+    printf '    - net-tools\n'
+    printf '  late-commands:\n'
+    printf "    - sed -i 's/^#\\\\?PasswordAuthentication.*/PasswordAuthentication yes/' /target/etc/ssh/sshd_config\n"
+    printf '  user-data:\n'
+    printf '    disable_root: false\n'
+  } > "${seed_dir}/user-data"
 
   # meta-data must exist (can be empty for nocloud)
   : > "${seed_dir}/meta-data"
@@ -926,20 +928,14 @@ create_vm() {
   if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     ok "VM '${VM_NAME}' already exists. Skipping virt-install."
   else
-    # ── Generate autoinstall seed if enabled ──────────────────────────────────
-    local extra_args="" seed_disk_arg=""
+    # ── Generate autoinstall user-data if enabled ─────────────────────────────
+    local cloud_init_arg=""
     if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
       generate_autoinstall
-      create_seed_iso
-      source_vm_conf  # reload to pick up VM_SEED_ISO
-      # Ensure seed ISO accessible too
-      local seed_path
-      seed_path="$(_ensure_libvirt_readable "$VM_SEED_ISO")"
-      [ -z "$seed_path" ] && seed_path="$VM_SEED_ISO"
-      seed_disk_arg="--disk path=${seed_path},device=cdrom,readonly=on,format=raw"
-      # ds=nocloud: cloud-init auto-discovers the cidata-labeled seed ISO block device
-      # s=/cidata/ is wrong here — that's for HTTP/directory, not block device label
-      extra_args="autoinstall ds=nocloud quiet ---"
+      local seed_dir="${VM_CONF_DIR}/${VM_NAME}-seed"
+      # virt-install 4.0+ supports --cloud-init with --location (bug fixed upstream)
+      # This is cleaner than a seed ISO and avoids nocloud block device discovery issues
+      cloud_init_arg="--cloud-init user-data=${seed_dir}/user-data,meta-data=${seed_dir}/meta-data"
       info "Ubuntu autoinstall enabled — installation will run unattended (~10-15 min)"
     fi
 
@@ -961,8 +957,8 @@ create_vm() {
       --video "${VM_VIDEO:-none}" \
       --console "${VM_CONSOLE:-pty,target_type=serial}" \
       --location "${iso_path},kernel=casper/vmlinuz,initrd=casper/initrd" \
-      ${seed_disk_arg} \
-      ${extra_args:+--extra-args "$extra_args"} \
+      --extra-args "autoinstall" \
+      ${cloud_init_arg} \
       --noautoconsole; then
       err "virt-install failed! Check the error above."
       err "Common fixes: missing OVMF firmware, invalid ISO path, or libvirtd not running."
