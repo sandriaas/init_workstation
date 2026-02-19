@@ -686,6 +686,7 @@ VM_ISO_PATH="${VM_ISO_PATH}"
 VM_ISO_URL="${VM_ISO_URL}"
 VM_ISO_SHA256_URL="${VM_ISO_SHA256_URL}"
 VM_CLOUD_IMG_URL="${VM_CLOUD_IMG_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
+VM_CLOUD_IMG_PATH="${VM_CLOUD_IMG_PATH:-${USER_HOME}/iso/noble-server-cloudimg-amd64.img}"
 VM_BOOT_ORDER="${VM_BOOT_ORDER:-hd,cdrom}"
 # Autoinstall: yes = cloud-init autoinstall (fully unattended), no = manual
 VM_AUTOINSTALL="${VM_AUTOINSTALL:-yes}"
@@ -1026,17 +1027,19 @@ create_vm() {
     # ── Option 2: Cloud image — download pre-installed image, boot in ~30s ──
     local cloud_img_url="${VM_CLOUD_IMG_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
     local cloud_img_name; cloud_img_name="$(basename "$cloud_img_url")"
-    local cloud_img_cache="${VM_CONF_DIR}/${cloud_img_name}"
+    # Use VM_CLOUD_IMG_PATH if set, else default to ~/iso/ (shared cache across VMs)
+    local cloud_img_cache="${VM_CLOUD_IMG_PATH:-${USER_HOME}/iso/${cloud_img_name}}"
+    mkdir -p "$(dirname "$cloud_img_cache")"
 
-    # Download cloud image (cached — only downloaded once)
-    if [ ! -f "$cloud_img_cache" ]; then
+    # Use existing file if present, otherwise download and cache
+    if [ -f "$cloud_img_cache" ]; then
+      ok "Cloud image found: ${cloud_img_cache}"
+    else
       info "Downloading Ubuntu cloud image (~600MB)..."
-      info "  ${cloud_img_url}"
+      info "  ${cloud_img_url} → ${cloud_img_cache}"
       wget -q --show-progress -O "${cloud_img_cache}.tmp" "$cloud_img_url" \
         && mv "${cloud_img_cache}.tmp" "$cloud_img_cache" \
         || { rm -f "${cloud_img_cache}.tmp"; err "Download failed"; return 1; }
-    else
-      ok "Cloud image cached: ${cloud_img_cache}"
     fi
 
     # Convert + resize to VM disk path
