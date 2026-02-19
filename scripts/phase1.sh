@@ -518,7 +518,7 @@ print_final_summary() {
   if [ -z "$TUNNEL_HOST_SAVED" ]; then
     for cfg in "$USER_HOME/.cloudflared/config.yml" /etc/cloudflared/config.yml; do
       if [ -f "$cfg" ]; then
-        TUNNEL_HOST_SAVED="$(awk '/hostname:/{print $2; exit}' "$cfg" 2>/dev/null || true)"
+        TUNNEL_HOST_SAVED="$(awk '/hostname:/{print $NF; exit}' "$cfg" 2>/dev/null || true)"
         [ -n "$TUNNEL_HOST_SAVED" ] && break
       fi
     done
