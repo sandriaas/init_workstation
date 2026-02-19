@@ -349,19 +349,20 @@ run_remote_setup() {
     echo ""
   fi
 
-  # Confirm/update the VM tunnel hostname to match Cloudflare dashboard
-  echo "  ── Confirm VM Tunnel Hostname ─────────────────────────────"
-  echo "  Current: ${VM_TUNNEL_HOST}"
-  echo "  This must match the Public Hostname configured in the Cloudflare dashboard"
-  echo "  for this tunnel. Press Enter to keep current."
+  # VM tunnel hostname — auto-generate fresh random subdomain, user only inputs subdomain part
+  local _domain="${HOST_TUNNEL_DOMAIN:-${VM_TUNNEL_HOST#*.}}"
+  local _new_suffix; _new_suffix="vm-$(tr -dc a-z0-9 </dev/urandom | head -c 8)"
+  local _new_default="${_new_suffix}.${_domain}"
+  echo "  ── VM Tunnel Hostname ──────────────────────────────────"
+  echo "  Domain: ${_domain}"
+  echo "  Auto-generated subdomain: ${_new_suffix}  (full: ${_new_default})"
+  echo "  Enter a custom subdomain or press Enter to use the generated one."
   echo ""
-  read -r -p "  VM tunnel hostname [${VM_TUNNEL_HOST}]: " _new_host
-  if [ -n "${_new_host:-}" ] && [ "$_new_host" != "$VM_TUNNEL_HOST" ]; then
-    VM_TUNNEL_HOST="$_new_host"
-    # Persist to conf immediately so test_cf_tunnel uses the right hostname
-    sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
-    ok "VM_TUNNEL_HOST updated → ${VM_TUNNEL_HOST}"
-  fi
+  read -r -p "  Subdomain [${_new_suffix}]: " _input_sub
+  local _final_sub="${_input_sub:-${_new_suffix}}"
+  VM_TUNNEL_HOST="${_final_sub}.${_domain}"
+  sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
+  ok "VM tunnel hostname → ${VM_TUNNEL_HOST}"
   echo ""
 
   ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_SSH_USER}@${VM_SSH_HOST}" \
