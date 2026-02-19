@@ -262,7 +262,7 @@ _resolve_vm_ip() {
 
 _ssh_alive() {
   local host="$1"
-  ssh -o StrictHostKeyChecking=accept-new \
+  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
       -o ConnectTimeout=3 \
       -o BatchMode=yes \
       "${VM_SSH_USER}@${host}" true 2>/dev/null
@@ -270,6 +270,9 @@ _ssh_alive() {
 
 wait_for_ssh() {
   section "Step 2 — Wait for VM SSH"
+
+  # Clear stale known_hosts — VM may have been recreated with new host keys
+  ssh-keygen -R "${VM_STATIC_IP%/*}" 2>/dev/null || true
 
   # If phase2 already confirmed SSH, use that IP and do a quick check
   [ -f "$_STATE" ] && source "$_STATE" 2>/dev/null || true
@@ -346,7 +349,7 @@ run_remote_setup() {
     echo ""
   fi
 
-  ssh -T -o StrictHostKeyChecking=accept-new "${VM_SSH_USER}@${VM_SSH_HOST}" \
+  ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_SSH_USER}@${VM_SSH_HOST}" \
     "VM_NAME='${VM_NAME}' \
      VM_AUTOINSTALL='${VM_AUTOINSTALL:-yes}' \
      VM_TUNNEL_HOST='${VM_TUNNEL_HOST}' \
@@ -494,7 +497,7 @@ test_cf_tunnel() {
   local attempts=0
   while [ $attempts -lt 6 ]; do
     if ssh \
-         -o StrictHostKeyChecking=accept-new \
+         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
          -o ConnectTimeout=10 \
          -o BatchMode=yes \
          -o "ProxyCommand=cloudflared access ssh --hostname %h" \
@@ -628,10 +631,10 @@ main() {
   # Steps 3–8: configure VM internals over SSH
   # Skip full setup only if cloudflared is active AND tunnel is registered with Cloudflare
   local _cf_running _cf_connected
-  _cf_running="$(ssh -T -o StrictHostKeyChecking=accept-new \
+  _cf_running="$(ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=5 -o BatchMode=yes "${VM_SSH_USER}@${VM_SSH_HOST}" \
     "systemctl is-active cloudflared 2>/dev/null || echo inactive" 2>/dev/null || echo inactive)"
-  _cf_connected="$(ssh -T -o StrictHostKeyChecking=accept-new \
+  _cf_connected="$(ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=5 -o BatchMode=yes "${VM_SSH_USER}@${VM_SSH_HOST}" \
     "journalctl -u cloudflared -n 50 --no-pager 2>/dev/null | grep -c 'Connection registered' || echo 0" \
     2>/dev/null || echo 0)"

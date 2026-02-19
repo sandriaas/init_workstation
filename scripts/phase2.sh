@@ -1177,6 +1177,9 @@ test_vm_ssh() {
   info "Polling SSH at ${VM_USER}@${vm_ip} (up to ~5 min)..."
   info "cloud-init configures on first boot then reboots — SSH appears after reboot."
 
+  # Clear stale known_hosts entry — VM recreated = new host keys, old entry causes silent reject
+  ssh-keygen -R "$vm_ip" 2>/dev/null || true
+
   # Stream serial console via PTY device (--serial pty → /dev/pts/N)
   local console_pid=""
   local pty_dev
@@ -1210,7 +1213,7 @@ test_vm_ssh() {
       | awk '/ipv4/{print $4}' | cut -d/ -f1 | head -1 || true)"
     [ -n "${dhcp:-}" ] && cur_ip="$dhcp"
 
-    if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=3 -o BatchMode=yes \
+    if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -o BatchMode=yes \
            "${VM_USER}@${cur_ip}" true 2>/dev/null; then
       echo ""
       [ -n "$console_pid" ] && { kill "$console_pid" 2>/dev/null; echo "──────────────────────────────────────────────────────────"; }
@@ -1461,7 +1464,7 @@ main() {
     echo ""
     info "VM '${VM_NAME}' already exists (state: ${_early_state}). Checking SSH..."
     if [ "$_early_state" = "running" ] && \
-       ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes \
+       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes \
            "${VM_USER}@${_check_ip}" true 2>/dev/null; then
       ok "VM SSH reachable at ${VM_USER}@${_check_ip} — skipping install."
       VM_SSH_RESULT="✓  ${VM_USER}@${_check_ip}"
