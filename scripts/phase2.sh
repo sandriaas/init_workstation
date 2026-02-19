@@ -664,7 +664,7 @@ EOF
 
 # ── Machine / Firmware ────────────────────────────────────────────────────────
 # machine: pc (i440fx) required for legacy IGD passthrough; q35 for everything else
-VM_MACHINE_TYPE="${VM_MACHINE_TYPE:-pc}"
+VM_MACHINE_TYPE="${VM_MACHINE_TYPE:-q35}"
 # firmware: uefi (OVMF) or bios
 VM_FIRMWARE="${VM_FIRMWARE:-uefi}"
 # cpu: host-passthrough exposes all host CPU features to guest
@@ -1068,7 +1068,7 @@ create_vm() {
       --memory "$VM_RAM_MB" \
       --vcpus "$VM_VCPUS" \
       --cpu "${VM_CPU_MODEL:-host-passthrough}" \
-      --machine "${VM_MACHINE_TYPE:-pc}" \
+      --machine "${VM_MACHINE_TYPE:-q35}" \
       --boot "loader=${OVMF_CODE},loader.readonly=yes,loader.type=pflash,nvram.template=${OVMF_VARS}" \
       --disk "path=${VM_DISK_PATH},format=${VM_DISK_FORMAT:-qcow2},bus=${VM_DISK_BUS:-virtio}" \
       --disk "path=${seed_iso_dest},device=cdrom,bus=sata" \
