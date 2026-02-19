@@ -8,6 +8,8 @@
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
+# Force TLS 1.2 — required for GitHub (PS 5.1 defaults to TLS 1.0)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Info  { Write-Host "[INFO] $args" -ForegroundColor Cyan }
 function Ok    { Write-Host "[OK]   $args" -ForegroundColor Green }
@@ -48,7 +50,7 @@ function Install-Websocat {
     if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir | Out-Null }
     $dest = "$binDir\websocat.exe"
     $url  = "https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-pc-windows-msvc.exe"
-    Invoke-WebRequest -Uri $url -OutFile $dest
+    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
     # Add ~/bin to user PATH if not already there
     $userPath = [System.Environment]::GetEnvironmentVariable("PATH","User")
     if ($userPath -notlike "*$binDir*") {
