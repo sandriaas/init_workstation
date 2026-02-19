@@ -152,7 +152,15 @@ if [ -n "${DKMS_KERNEL:-}" ]; then
     pass "Running on dkms-compatible kernel (${KERNEL})"
   else
     warn "Running ${KERNEL} — dkms built for ${DKMS_KERNEL}"
-    flag "Boot default should be set to ${DKMS_KERNEL} (check /etc/default/limine DEFAULT_ENTRY)"
+    # Check if default boot is correctly configured
+    _limine_default="$(grep "^DEFAULT_ENTRY=" /etc/default/limine 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
+    _limine_remember="$(grep "^remember_last_entry:" /boot/limine.conf 2>/dev/null | awk '{print $2}' || true)"
+    if [ -n "${_limine_default}" ] && [ "${_limine_remember}" != "yes" ]; then
+      flag "Boot default set (${_limine_default}) — reboot to switch to ${DKMS_KERNEL}"
+    else
+      flag "Boot default should be set to ${DKMS_KERNEL} (check /etc/default/limine DEFAULT_ENTRY)"
+      [ "${_limine_remember}" = "yes" ] && flag "remember_last_entry=yes overrides default_entry — run: sudo sed -i 's/remember_last_entry: yes/remember_last_entry: no/' /boot/limine.conf"
+    fi
   fi
 else
   bad  "i915-sriov-dkms not installed — run phase1 step 6"

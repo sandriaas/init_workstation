@@ -508,6 +508,10 @@ _check_sriov_kernel_boot() {
     else
       sudo sed -i "s|^DEFAULT_ENTRY=.*|DEFAULT_ENTRY=\"${LIMINE_ENTRY}\"|" /etc/default/limine
     fi
+    # Disable remember_last_entry so default_entry takes effect
+    if [ -f /boot/limine.conf ]; then
+      sudo sed -i 's/^remember_last_entry: yes/remember_last_entry: no/' /boot/limine.conf
+    fi
     sudo limine-update
     ok "Limine default boot → ${LIMINE_ENTRY} (${COMPAT_KERNEL})"
   elif [ -f /etc/default/grub ]; then
