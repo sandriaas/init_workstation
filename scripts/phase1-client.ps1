@@ -43,17 +43,20 @@ function Install-Websocat {
     if (Get-Command websocat -ErrorAction SilentlyContinue) {
         Ok "websocat already installed"; return
     }
-    Info "Installing websocat via Scoop (extras bucket)..."
-    scoop bucket add extras 2>$null
-    scoop install extras/websocat
-    # Refresh PATH so websocat is available in this session
-    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
-                [System.Environment]::GetEnvironmentVariable("PATH","User")
-    if (-not (Get-Command websocat -ErrorAction SilentlyContinue)) {
-        Warn "websocat not found in PATH after install — check Scoop output above"
-        exit 1
+    Info "Installing websocat from GitHub releases..."
+    $binDir = "$env:USERPROFILE\bin"
+    if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir | Out-Null }
+    $dest = "$binDir\websocat.exe"
+    $url  = "https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-pc-windows-msvc.exe"
+    Invoke-WebRequest -Uri $url -OutFile $dest
+    # Add ~/bin to user PATH if not already there
+    $userPath = [System.Environment]::GetEnvironmentVariable("PATH","User")
+    if ($userPath -notlike "*$binDir*") {
+        [System.Environment]::SetEnvironmentVariable("PATH", "$userPath;$binDir", "User")
     }
-    Ok "websocat installed"
+    $env:PATH += ";$binDir"
+    if (-not (Test-Path $dest)) { Warn "websocat download failed"; exit 1 }
+    Ok "websocat installed to $dest"
 }
 
 # ─── Install OpenSSH client ───────────────────────────────────────────────────
@@ -91,7 +94,7 @@ function Setup-SshConfig {
 
     # Resolve full path to websocat.exe for ProxyCommand
     $websocat = (Get-Command websocat -ErrorAction SilentlyContinue)?.Source
-    if (-not $websocat) { $websocat = "$env:USERPROFILE\scoop\shims\websocat.exe" }
+    if (-not $websocat) { $websocat = "$env:USERPROFILE\bin\websocat.exe" }
 
     $entry = @"
 
