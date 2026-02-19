@@ -937,7 +937,7 @@ create_vm() {
       seed_path="$(_ensure_libvirt_readable "$VM_SEED_ISO")"
       [ -z "$seed_path" ] && seed_path="$VM_SEED_ISO"
       seed_disk_arg="--disk path=${seed_path},device=cdrom,readonly=on,format=raw"
-      extra_args="autoinstall ds=nocloud;s=/cidata/ console=ttyS0,115200n8 quiet ---"
+      extra_args="autoinstall ds=nocloud;s=/cidata/ quiet ---"
       info "Ubuntu autoinstall enabled — installation will run unattended (~10-15 min)"
     fi
 
