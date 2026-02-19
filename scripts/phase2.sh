@@ -236,6 +236,7 @@ prompt_iso() {
   section "Step 3: Ubuntu ISO"
   VM_OS_VARIANT="ubuntu24.04"
   VM_ISO_URL="https://releases.ubuntu.com/24.04.3/ubuntu-24.04.3-live-server-amd64.iso"
+  VM_ISO_SHA256_URL="https://releases.ubuntu.com/24.04.3/SHA256SUMS"
   VM_ISO_PATH_DEFAULT="${USER_HOME}/iso/ubuntu-24.04.3-live-server-amd64.iso"
   mkdir -p "${USER_HOME}/iso"
 
@@ -244,11 +245,36 @@ prompt_iso() {
   echo "  3) Enter a custom destination path"
   ask "Choice [1/2/3]: "; read -r ISO_CHOICE
 
+  _iso_sha256_expected() {
+    curl -fsSL "$VM_ISO_SHA256_URL" 2>/dev/null \
+      | grep "$(basename "$VM_ISO_URL")" | awk '{print $1}' | head -1
+  }
+
+  _verify_iso() {
+    local dest="$1"
+    info "Verifying ISO checksum..."
+    local expected; expected="$(_iso_sha256_expected)"
+    if [ -z "${expected:-}" ]; then
+      warn "Could not fetch SHA256SUMS — skipping verification"
+      return 0
+    fi
+    local actual; actual="$(sha256sum "$dest" | awk '{print $1}')"
+    if [ "$actual" = "$expected" ]; then
+      ok "ISO checksum verified ✓"
+    else
+      warn "ISO checksum MISMATCH — file may be incomplete or corrupted"
+      warn "  Expected: $expected"
+      warn "  Actual:   $actual"
+      warn "Removing bad file and re-downloading..."
+      rm -f "$dest"
+      return 1
+    fi
+  }
+
   _download_iso() {
     local dest="$1"
     info "Downloading Ubuntu ISO to $dest"
     info "(supports resume — safe to Ctrl+C and rerun)"
-    # Try wget first (handles redirects + resume cleanly), fall back to curl
     if command -v wget &>/dev/null; then
       wget --continue --show-progress --tries=5 --timeout=30 \
            -O "$dest" "$VM_ISO_URL"
@@ -259,24 +285,29 @@ prompt_iso() {
     fi
   }
 
+  _ensure_iso() {
+    local dest="$1"
+    # Download if missing, then verify; re-download once if checksum fails
+    [ -f "$dest" ] || _download_iso "$dest"
+    if ! _verify_iso "$dest"; then
+      _download_iso "$dest"
+      _verify_iso "$dest" || { warn "ISO still invalid after re-download. Check your connection."; exit 1; }
+    fi
+  }
+
   case "${ISO_CHOICE:-1}" in
     1)
       VM_ISO_PATH="$VM_ISO_PATH_DEFAULT"
-      if [ ! -f "$VM_ISO_PATH" ]; then
-        _download_iso "$VM_ISO_PATH"
-      else
-        ok "ISO already exists: $VM_ISO_PATH"
-      fi
+      _ensure_iso "$VM_ISO_PATH"
       ;;
     2)
       ask "Existing ISO path: "; read -r VM_ISO_PATH
       [ -f "$VM_ISO_PATH" ] || { warn "ISO not found: $VM_ISO_PATH"; exit 1; }
+      _verify_iso "$VM_ISO_PATH" || { warn "Existing ISO failed checksum."; exit 1; }
       ;;
     3)
       ask "Destination ISO path: "; read -r VM_ISO_PATH
-      if [ ! -f "$VM_ISO_PATH" ]; then
-        _download_iso "$VM_ISO_PATH"
-      fi
+      _ensure_iso "$VM_ISO_PATH"
       ;;
     *)
       VM_ISO_PATH="$VM_ISO_PATH_DEFAULT"
@@ -478,6 +509,7 @@ VM_DISK_BUS="${VM_DISK_BUS:-virtio}"
 VM_OS_VARIANT="${VM_OS_VARIANT}"
 VM_ISO_PATH="${VM_ISO_PATH}"
 VM_ISO_URL="${VM_ISO_URL}"
+VM_ISO_SHA256_URL="${VM_ISO_SHA256_URL}"
 VM_BOOT_ORDER="${VM_BOOT_ORDER:-hd,cdrom}"
 
 # ── Network ───────────────────────────────────────────────────────────────────
