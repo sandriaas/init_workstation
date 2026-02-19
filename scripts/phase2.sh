@@ -168,13 +168,23 @@ detect_host_tunnel() {
   HOST_TUNNEL_HOST=""
   HOST_TUNNEL_DOMAIN=""
 
-  # 1. Check cloudflared config.yml (most reliable — set by phase1)
+  # Parse hostname from cloudflared YAML config.
+  # Line format is either:
+  #   hostname: value          (2 fields: $1=key, $2=value)
+  #   - hostname: value        (3 fields: $1=-, $2=key, $3=value)
+  # Use $NF (last field) which is always the value, and skip wildcard entries.
+  _parse_cf_hostname() {
+    grep -h "hostname:" "$@" 2>/dev/null \
+      | awk '{v=$NF} v!="" && v!~/^\*/ {print v; exit}'
+  }
+
+  # 1. Check cloudflared config.yml files (most reliable — set by phase1)
   local cfg host
   for cfg in "$USER_HOME/.cloudflared/config.yml" \
              "/etc/cloudflared/config.yml" \
              "${REPO_DIR}/configs/cloudflared-config.yml"; do
     if [ -f "$cfg" ]; then
-      host="$(awk '/hostname:/{print $2; exit}' "$cfg" 2>/dev/null || true)"
+      host="$(_parse_cf_hostname "$cfg")"
       if [ -n "${host:-}" ]; then
         HOST_TUNNEL_HOST="$host"
         HOST_TUNNEL_DOMAIN="${host#*.}"
@@ -183,17 +193,12 @@ detect_host_tunnel() {
     fi
   done
 
-  # 2. Try cloudflared tunnel list (reads from credentials files)
-  host="$(cloudflared tunnel list 2>/dev/null | awk 'NR>1 && $1!="ID" {print $2; exit}' || true)"
+  # 2. Search all *.yml files in ~/.cloudflared/
+  host="$(_parse_cf_hostname "$USER_HOME"/.cloudflared/*.yml 2>/dev/null || true)"
   if [ -n "${host:-}" ]; then
-    # tunnel name only — try to find hostname from any ingress rule
-    local creds_dir="$USER_HOME/.cloudflared"
-    host="$(grep -rh "hostname:" "$creds_dir" 2>/dev/null | awk '{print $2}' | grep -v '^\*' | head -1 || true)"
-    if [ -n "${host:-}" ]; then
-      HOST_TUNNEL_HOST="$host"
-      HOST_TUNNEL_DOMAIN="${host#*.}"
-      return
-    fi
+    HOST_TUNNEL_HOST="$host"
+    HOST_TUNNEL_DOMAIN="${host#*.}"
+    return
   fi
 
   # 3. Check systemd service env for tunnel info
