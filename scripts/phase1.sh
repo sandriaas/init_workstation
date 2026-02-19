@@ -254,11 +254,11 @@ step_packages() {
   install_websocat      # no-op on Arch
 
   # Enable core services
-  sudo systemctl enable --now sshd 2>/dev/null || sudo systemctl enable --now ssh 2>/dev/null || true
+  sudo systemctl enable --now sshd || sudo systemctl enable --now ssh || true
   sudo systemctl enable --now docker
   sudo systemctl enable --now fail2ban
-  sudo systemctl enable --now libvirtd.socket 2>/dev/null || sudo systemctl enable --now libvirtd 2>/dev/null || true
-  sudo systemctl enable --now cockpit.socket 2>/dev/null || true
+  sudo systemctl enable --now libvirtd.socket || sudo systemctl enable --now libvirtd || true
+  sudo systemctl enable --now cockpit.socket || true
 
   # Add user to required groups (active after reboot)
   for grp in docker libvirt kvm; do
@@ -380,7 +380,7 @@ step_ssh() {
   # Ensure password authentication is explicitly enabled
   sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
   sudo sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
-  sudo systemctl reload sshd 2>/dev/null || sudo systemctl reload ssh 2>/dev/null || true
+  sudo systemctl reload sshd || sudo systemctl reload ssh || true
   ok "Password authentication enabled — connect with: ssh minipc (enter your login password)"
 }
 

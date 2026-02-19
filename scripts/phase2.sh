@@ -1325,7 +1325,7 @@ main() {
     echo "  2) Skip — start later manually"
     ask "Choice [1/2, default=1]: "; read -r _start_choice
     if [ "${_start_choice:-1}" != "2" ]; then
-      sudo virsh start "$VM_NAME" 2>/dev/null && ok "VM '${VM_NAME}' started." \
+      sudo virsh start "$VM_NAME" && ok "VM '${VM_NAME}' started." \
         || warn "Failed to start VM — check: virsh start ${VM_NAME}"
     else
       info "Skipping VM start. Start manually: sudo virsh start ${VM_NAME}"
