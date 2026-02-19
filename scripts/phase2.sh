@@ -152,6 +152,19 @@ check_requirements() {
     echo -e "  ${YELLOW}!${RESET} SR-IOV VFs not yet active — run phase1 (step 6) + reboot first"
   fi
 
+  # Packer (used for VM image building)
+  if command -v packer &>/dev/null; then
+    echo -e "  ${GREEN}✓${RESET} packer $(packer version | awk '{print $2}')"
+  else
+    echo -e "  ${YELLOW}!${RESET} packer not found — installing..."
+    case "${OS:-arch}" in
+      arch) sudo pacman -S --noconfirm packer && echo -e "  ${GREEN}✓${RESET} packer installed" ;;
+      ubuntu|proxmox) sudo apt-get install -y packer && echo -e "  ${GREEN}✓${RESET} packer installed" ;;
+      fedora) sudo dnf install -y packer && echo -e "  ${GREEN}✓${RESET} packer installed" ;;
+      *) warn "Could not install packer automatically — install manually: https://developer.hashicorp.com/packer/install" ; warn_count=$((warn_count+1)) ;;
+    esac
+  fi
+
   echo ""
   echo "  Required BIOS/UEFI settings (set before running):"
   echo "    • UEFI-only boot (disable Legacy/CSM)    • VGA OpROM = UEFI"
@@ -933,7 +946,7 @@ create_vm() {
     # The VM reaches the host via the libvirt bridge gateway (192.168.122.1).
     # --cloud-init with --location is bugged on non-Ubuntu virt-install builds
     # (Launchpad #2073461) — HTTP avoids that entirely.
-    local http_pid="" http_port=3003
+    local http_pid="" http_port=3003 http_log=""
     if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
       generate_autoinstall
       local seed_dir="${VM_CONF_DIR}/${VM_NAME}-seed"
@@ -941,12 +954,18 @@ create_vm() {
       while ss -tlnp 2>/dev/null | grep -q ":${http_port} "; do
         (( http_port++ )) || true
       done
-      # Open firewall port on virbr0 — INPUT policy is DROP by default on CachyOS
+      # Host-specific fix: UFW INPUT policy DROP blocks libvirt DHCP/DNS by default.
+      # Allow DHCP/DNS + cloud-init HTTP from VM network (virbr0) during install.
+      sudo iptables -I INPUT -i virbr0 -p udp --dport 67 -j ACCEPT 2>/dev/null || true
+      sudo iptables -I INPUT -i virbr0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+      sudo iptables -I INPUT -i virbr0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
       sudo iptables -I INPUT -i virbr0 -p tcp --dport "$http_port" -j ACCEPT 2>/dev/null || true
+      http_log="/tmp/${VM_NAME}-cloudinit-http.log"
       python3 -m http.server "$http_port" --directory "$seed_dir" \
-        --bind 192.168.122.1 2>&1 | grep -v "^$" &
+        --bind 192.168.122.1 >"$http_log" 2>&1 &
       http_pid=$!
       info "Serving cloud-init data at http://192.168.122.1:${http_port}/ (pid ${http_pid})"
+      info "cloud-init HTTP log: ${http_log}"
       info "Ubuntu autoinstall enabled — installation will run unattended (~10-15 min)"
     fi
 
@@ -990,6 +1009,9 @@ create_vm() {
       sleep 300
       kill "$http_pid" 2>/dev/null || true
       sudo iptables -D INPUT -i virbr0 -p tcp --dport "$http_port" -j ACCEPT 2>/dev/null || true
+      sudo iptables -D INPUT -i virbr0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+      sudo iptables -D INPUT -i virbr0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+      sudo iptables -D INPUT -i virbr0 -p udp --dport 67 -j ACCEPT 2>/dev/null || true
       info "cloud-init HTTP server stopped, firewall rule removed."
     fi
 
