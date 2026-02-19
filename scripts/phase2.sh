@@ -167,45 +167,54 @@ default_if_empty() {
 detect_host_tunnel() {
   HOST_TUNNEL_HOST=""
   HOST_TUNNEL_DOMAIN=""
+  HOST_TUNNEL_NAME=""
+  HOST_TUNNEL_ID=""
 
-  # Parse hostname from cloudflared YAML config.
-  # Line format is either:
-  #   hostname: value          (2 fields: $1=key, $2=value)
-  #   - hostname: value        (3 fields: $1=-, $2=key, $3=value)
-  # Use $NF (last field) which is always the value, and skip wildcard entries.
-  _parse_cf_hostname() {
+  # Parse a specific YAML key's value from cloudflared config files.
+  # Handles both '  key: value' and '  - key: value' formats via $NF.
+  _cf_val() {
+    local key="$1"; shift
+    grep -h "${key}:" "$@" 2>/dev/null \
+      | awk -v k="${key}:" '{for(i=1;i<=NF;i++) if($i==k){print $(i+1); exit}}' \
+      | head -1
+  }
+  # hostname lines use $NF (last field) because value has no sub-keys after it
+  _cf_hostname() {
     grep -h "hostname:" "$@" 2>/dev/null \
       | awk '{v=$NF} v!="" && v!~/^\*/ {print v; exit}'
   }
 
-  # 1. Check cloudflared config.yml files (most reliable — set by phase1)
-  local cfg host
-  for cfg in "$USER_HOME/.cloudflared/config.yml" \
-             "/etc/cloudflared/config.yml" \
-             "${REPO_DIR}/configs/cloudflared-config.yml"; do
-    if [ -f "$cfg" ]; then
-      host="$(_parse_cf_hostname "$cfg")"
-      if [ -n "${host:-}" ]; then
-        HOST_TUNNEL_HOST="$host"
-        HOST_TUNNEL_DOMAIN="${host#*.}"
-        return
-      fi
+  local cfg
+  # Primary: ~/.cloudflared/config.yml (written by phase1)
+  for cfg in "$USER_HOME/.cloudflared/config.yml" "/etc/cloudflared/config.yml"; do
+    [ -f "$cfg" ] || continue
+    local h; h="$(_cf_hostname "$cfg")"
+    [ -n "${h:-}" ] || continue
+    HOST_TUNNEL_HOST="$h"
+    HOST_TUNNEL_DOMAIN="${h#*.}"
+    HOST_TUNNEL_ID="$(_cf_val "tunnel" "$cfg")"
+    # Tunnel name: read from credentials JSON if we have the ID
+    if [ -n "${HOST_TUNNEL_ID:-}" ]; then
+      local cred="$USER_HOME/.cloudflared/${HOST_TUNNEL_ID}.json"
+      [ -f "$cred" ] && \
+        HOST_TUNNEL_NAME="$(python3 -c "import json,sys; d=json.load(open('$cred')); print(d.get('TunnelName',''))" 2>/dev/null || true)"
     fi
+    return
   done
 
-  # 2. Search all *.yml files in ~/.cloudflared/
-  host="$(_parse_cf_hostname "$USER_HOME"/.cloudflared/*.yml 2>/dev/null || true)"
-  if [ -n "${host:-}" ]; then
-    HOST_TUNNEL_HOST="$host"
-    HOST_TUNNEL_DOMAIN="${host#*.}"
-    return
+  # Fallback: scan all yml files in ~/.cloudflared/
+  local h; h="$(_cf_hostname "$USER_HOME"/.cloudflared/*.yml 2>/dev/null || true)"
+  if [ -n "${h:-}" ]; then
+    HOST_TUNNEL_HOST="$h"
+    HOST_TUNNEL_DOMAIN="${h#*.}"
   fi
 
-  # 3. Check systemd service env for tunnel info
-  host="$(systemctl cat cloudflared 2>/dev/null | grep -oP 'hostname\s+\K\S+' | head -1 || true)"
-  if [ -n "${host:-}" ]; then
-    HOST_TUNNEL_HOST="$host"
-    HOST_TUNNEL_DOMAIN="${host#*.}"
+  # Fallback: systemd ExecStart config arg
+  local svc_cfg; svc_cfg="$(systemctl cat cloudflared 2>/dev/null \
+    | grep -oP '(?<=--config )\S+' | head -1 || true)"
+  if [ -n "${svc_cfg:-}" ] && [ -f "$svc_cfg" ]; then
+    local h2; h2="$(_cf_hostname "$svc_cfg")"
+    [ -n "${h2:-}" ] && HOST_TUNNEL_HOST="$h2" && HOST_TUNNEL_DOMAIN="${h2#*.}"
   fi
 }
 
@@ -537,11 +546,19 @@ prompt_rom() {
 }
 
 prompt_tunnel() {
-  section "Step 6: VM Tunnel Domain"
+  section "Step 6: Cloudflare Tunnels"
   detect_host_tunnel
 
   if [ -n "${HOST_TUNNEL_HOST:-}" ]; then
-    ok "Detected host tunnel: ${HOST_TUNNEL_HOST} (domain: ${HOST_TUNNEL_DOMAIN})"
+    echo ""
+    echo -e "${GREEN}  ✓ Host tunnel detected:${RESET}"
+    printf "    %-16s %s\n" "Hostname:"  "$HOST_TUNNEL_HOST"
+    printf "    %-16s %s\n" "Domain:"    "$HOST_TUNNEL_DOMAIN"
+    [ -n "${HOST_TUNNEL_NAME:-}" ] && printf "    %-16s %s\n" "Tunnel name:" "$HOST_TUNNEL_NAME"
+    [ -n "${HOST_TUNNEL_ID:-}" ]   && printf "    %-16s %s\n" "Tunnel ID:"   "$HOST_TUNNEL_ID"
+    echo ""
+    echo "    SSH from anywhere:  ssh ${CURRENT_USER}@${HOST_TUNNEL_HOST}"
+    echo ""
     echo "  1) Use detected domain: ${HOST_TUNNEL_DOMAIN}  (recommended)"
     echo "  2) Use another domain"
     ask "Choice [1/2]: "; read -r DOMAIN_CHOICE
@@ -556,13 +573,18 @@ prompt_tunnel() {
     ask "Enter host tunnel hostname (e.g. abc123.${HOST_TUNNEL_DOMAIN}): "; read -r HOST_TUNNEL_HOST
   fi
 
+  echo ""
   VM_TUNNEL_NAME_DEFAULT="${VM_NAME}-ssh"
   VM_TUNNEL_HOST_DEFAULT="vm-$(tr -dc a-z0-9 </dev/urandom | head -c 8).${HOST_TUNNEL_DOMAIN}"
-  info "VM tunnel hostname will be: ${VM_TUNNEL_HOST_DEFAULT}"
+  echo -e "  VM tunnel will be a ${YELLOW}new${RESET} tunnel on the same domain."
   ask "VM tunnel name [${VM_TUNNEL_NAME_DEFAULT}]: "; read -r VM_TUNNEL_NAME
   ask "VM tunnel hostname [${VM_TUNNEL_HOST_DEFAULT}]: "; read -r VM_TUNNEL_HOST
   VM_TUNNEL_NAME="$(default_if_empty "$VM_TUNNEL_NAME" "$VM_TUNNEL_NAME_DEFAULT")"
   VM_TUNNEL_HOST="$(default_if_empty "$VM_TUNNEL_HOST" "$VM_TUNNEL_HOST_DEFAULT")"
+  echo ""
+  echo -e "  ${BOLD}Tunnel plan:${RESET}"
+  printf "    %-20s %s\n" "Host SSH tunnel:" "${HOST_TUNNEL_HOST}"
+  printf "    %-20s %s  (created by phase 3)\n" "VM SSH tunnel:"   "${VM_TUNNEL_HOST}"
 }
 
 write_vm_conf() {
@@ -645,6 +667,8 @@ KERNEL_GPU_ARGS="${KERNEL_GPU_ARGS}"
 # ── Cloudflare Tunnel ─────────────────────────────────────────────────────────
 HOST_TUNNEL_DOMAIN="${HOST_TUNNEL_DOMAIN}"
 HOST_TUNNEL_HOST="${HOST_TUNNEL_HOST}"
+HOST_TUNNEL_NAME="${HOST_TUNNEL_NAME:-}"
+HOST_TUNNEL_ID="${HOST_TUNNEL_ID:-}"
 VM_TUNNEL_NAME="${VM_TUNNEL_NAME}"
 VM_TUNNEL_HOST="${VM_TUNNEL_HOST}"
 EOF
@@ -990,8 +1014,14 @@ print_summary() {
   printf "  %-18s %s\n"                        "ROM:"        "${GPU_ROM_PATH}"
   echo ""
   echo -e "${BOLD}  ── Cloudflare Tunnels ───────────────────────────────────────${RESET}"
-  printf "  %-18s %s\n" "Host tunnel:"   "${HOST_TUNNEL_HOST}"
-  printf "  %-18s %s\n" "VM tunnel:"     "${VM_TUNNEL_HOST}  (name: ${VM_TUNNEL_NAME})"
+  printf "  %-20s %s\n" "Host hostname:"   "${HOST_TUNNEL_HOST}"
+  [ -n "${HOST_TUNNEL_NAME:-}" ] && printf "  %-20s %s\n" "Host tunnel name:" "${HOST_TUNNEL_NAME}"
+  [ -n "${HOST_TUNNEL_ID:-}" ]   && printf "  %-20s %s\n" "Host tunnel ID:"   "${HOST_TUNNEL_ID}"
+  printf "  %-20s %s\n" "Host connect:"    "ssh ${CURRENT_USER}@${HOST_TUNNEL_HOST}"
+  echo ""
+  printf "  %-20s %s\n" "VM hostname:"     "${VM_TUNNEL_HOST}"
+  printf "  %-20s %s\n" "VM tunnel name:"  "${VM_TUNNEL_NAME}"
+  printf "  %-20s %s\n" "VM connect:"      "ssh ${VM_USER}@${VM_TUNNEL_HOST}  (after phase 3)"
   echo ""
   echo -e "${BOLD}  ── Files ───────────────────────────────────────────────────${RESET}"
   printf "  %-18s %s\n" "VM conf:"       "$VM_CONF"

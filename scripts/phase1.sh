@@ -757,27 +757,44 @@ print_final_summary() {
   TUNNEL_HOST_SAVED=""
   [ -f /tmp/phase1_tunnel_host ] && TUNNEL_HOST_SAVED=$(cat /tmp/phase1_tunnel_host)
 
-  # Fallback: parse from existing cloudflared config.yml
-  if [ -z "$TUNNEL_HOST_SAVED" ]; then
-    for cfg in "$USER_HOME/.cloudflared/config.yml" /etc/cloudflared/config.yml; do
-      if [ -f "$cfg" ]; then
-        TUNNEL_HOST_SAVED="$(awk '/hostname:/{print $NF; exit}' "$cfg" 2>/dev/null || true)"
-        [ -n "$TUNNEL_HOST_SAVED" ] && break
-      fi
-    done
+  # Fallback: parse all fields from existing cloudflared config.yml
+  TUNNEL_ID_SAVED=""
+  TUNNEL_NAME_SAVED=""
+  local cfg
+  for cfg in "$USER_HOME/.cloudflared/config.yml" /etc/cloudflared/config.yml; do
+    [ -f "$cfg" ] || continue
+    [ -z "$TUNNEL_HOST_SAVED" ] && \
+      TUNNEL_HOST_SAVED="$(awk '/hostname:/{print $NF; exit}' "$cfg" 2>/dev/null || true)"
+    [ -z "$TUNNEL_ID_SAVED" ] && \
+      TUNNEL_ID_SAVED="$(awk '/^tunnel:/{print $NF; exit}' "$cfg" 2>/dev/null || true)"
+    [ -n "$TUNNEL_HOST_SAVED" ] && break
+  done
+  # Tunnel name from credentials JSON
+  if [ -n "${TUNNEL_ID_SAVED:-}" ]; then
+    local cred="$USER_HOME/.cloudflared/${TUNNEL_ID_SAVED}.json"
+    [ -f "$cred" ] && \
+      TUNNEL_NAME_SAVED="$(python3 -c "import json,sys; d=json.load(open('$cred')); print(d.get('TunnelName',''))" 2>/dev/null || true)"
   fi
 
   TUNNEL_HOST_SAVED="${TUNNEL_HOST_SAVED:-YOUR_TUNNEL_HOST}"
-  TUN_USER="${CURRENT_USER}"
+  local tunnel_domain="${TUNNEL_HOST_SAVED#*.}"
+  local host_ip; host_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
 
   echo ""
   echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
   echo -e "${BOLD}║              PHASE 1 COMPLETE                               ║${RESET}"
   echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
   echo ""
-  echo -e "${BOLD}Tunnel:${RESET} ${TUNNEL_HOST_SAVED}  ${BOLD}User:${RESET} ${TUN_USER}"
+  echo -e "${BOLD}  ── Cloudflare SSH Tunnel ──────────────────────────────────${RESET}"
+  printf "  %-20s %s\n" "Hostname:"     "$TUNNEL_HOST_SAVED"
+  printf "  %-20s %s\n" "Domain:"       "$tunnel_domain"
+  [ -n "${TUNNEL_NAME_SAVED:-}" ] && printf "  %-20s %s\n" "Tunnel name:"  "$TUNNEL_NAME_SAVED"
+  [ -n "${TUNNEL_ID_SAVED:-}" ]   && printf "  %-20s %s\n" "Tunnel ID:"    "$TUNNEL_ID_SAVED"
+  printf "  %-20s %s\n" "Host LAN IP:"  "$host_ip"
   echo ""
-  echo -e "${BOLD}── On each client device (phone, laptop, etc.) ──${RESET}"
+  echo -e "  ${BOLD}Connect from anywhere:${RESET}  ssh ${CURRENT_USER}@${TUNNEL_HOST_SAVED}"
+  echo ""
+  echo -e "${BOLD}  ── On each client device (phone, laptop, etc.) ──────────${RESET}"
   echo ""
   echo -e "  bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)"
   echo ""
