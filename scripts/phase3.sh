@@ -166,6 +166,15 @@ echo "VM setup done."
 REMOTE
 }
 
+# Write confirmed VM tunnel info back to vm.conf on the host
+update_vm_conf() {
+  if [ ! -f "$VM_CONF" ]; then return; fi
+  # Update VM_TUNNEL_HOST and VM_TUNNEL_NAME with whatever was actually used
+  sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF"
+  sed -i "s|^VM_TUNNEL_NAME=.*|VM_TUNNEL_NAME=\"${VM_TUNNEL_NAME}\"|" "$VM_CONF"
+  ok "vm.conf updated: VM_TUNNEL_HOST=${VM_TUNNEL_HOST}"
+}
+
 print_summary() {
   echo ""
   echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
@@ -189,6 +198,7 @@ main() {
   confirm "Proceed with VM internal setup now?" || exit 0
   prompt_target
   run_remote_setup
+  update_vm_conf
   print_summary
 }
 

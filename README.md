@@ -57,21 +57,22 @@ phase1.sh ───────────────────────�
   └─ packages + IOMMU + sleep mask + static IP
      + SSH + Cloudflare tunnel (systemd service)
 
-                        phase2.sh ───────────────► vm.conf written
-                          └─ prompt: CPU/RAM/disk/ISO/GPU gen/ROM
-                             detect system specs
-                             download ROM → /usr/share/kvm/igd.rom
-                             install i915-sriov-dkms (host)
-                             patch kernel args (limine/grub)
-                             virt-install (i440fx/OVMF/headless)
-                             attach virtiofs + VF hostdev XML
+              phase2.sh ──────────────────────────► writes vm.conf
+                └─ detect system specs             (VM_NAME, RAM, disk, ISO,
+                   prompt: CPU/RAM/disk/ISO           GPU gen/ROM, tunnel host)
+                   GPU gen selection + ROM download
+                   install i915-sriov-dkms (host)
+                   patch kernel args (limine/grub)
+                   virt-install (i440fx/OVMF/headless)
+                   attach virtiofs + VF hostdev XML
 
-                                        phase3.sh ──────────────► VM ready
-                                          └─ SSH into VM
-                                             packages + dkms + headers
-                                             i915-sriov-dkms (guest)
-                                             static IP + cloudflared
-                                             websocat tunnel
+                            phase3.sh ──────────────► updates vm.conf
+                              └─ reads vm.conf         (VM_TUNNEL_HOST confirmed)
+                                 SSH into VM
+                                 packages + dkms + headers
+                                 i915-sriov-dkms (guest — required!)
+                                 static IP + cloudflared tunnel
+                                 websocat service
 
 phase1-client.sh  (run on phone/laptop/desktop)
   └─ install websocat + openssh
