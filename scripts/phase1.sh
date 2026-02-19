@@ -45,12 +45,12 @@ detect_user() {
 
 # ─── System detection + requirements ─────────────────────────────────────────
 detect_system() {
-  SYS_CPU="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs)"
-  SYS_RAM="$(free -h 2>/dev/null | awk '/^Mem/{print $2}')"
+  SYS_CPU="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || true)"
+  SYS_RAM="$(free -h 2>/dev/null | awk '/^Mem/{print $2}' || true)"
   SYS_KERNEL="$(uname -r)"
-  SYS_IGPU="$(lspci 2>/dev/null | grep -i 'vga\|display' | grep -i intel | head -1 | sed 's/.*: //')"
-  SYS_DGPU="$(lspci 2>/dev/null | grep -i 'vga\|display' | grep -iv intel | head -1 | sed 's/.*: //')"
-  SYS_DISKS="$(lsblk -d -o NAME,SIZE,MODEL --noheadings 2>/dev/null | grep -v loop | awk '{printf "%s %s %s  ", $1,$2,$3}')"
+  SYS_IGPU="$(lspci 2>/dev/null | grep -iE 'VGA|Display' | grep -i intel | head -1 | sed 's/.*: //' || true)"
+  SYS_DGPU="$(lspci 2>/dev/null | grep -iE 'VGA|Display' | grep -iv intel | head -1 | sed 's/.*: //' || true)"
+  SYS_DISKS="$(lsblk -d -o NAME,SIZE,MODEL --noheadings 2>/dev/null | grep -v loop | awk '{printf "%s(%s) ", $1,$2}' || true)"
   SYS_BOOT_MODE="$( [ -d /sys/firmware/efi ] && echo 'UEFI ✓' || echo 'Legacy/CSM ✗ (set UEFI-only in BIOS!)')"
 
   # Detect Intel CPU gen from model name (rough heuristic)
