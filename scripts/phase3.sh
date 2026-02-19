@@ -228,8 +228,12 @@ ensure_vm_running() {
   fi
 
   if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-    info "Ubuntu autoinstall is running inside the VM (~10-15 min total)."
-    info "Optional — watch progress: sudo virsh console ${VM_NAME}  (exit: Ctrl+])"
+    info "Attaching to VM console — Ubuntu autoinstall output will stream here."
+    info "Press ${BOLD}Ctrl+]${RESET} to detach (script will continue to SSH check)."
+    echo ""
+    virsh console "$VM_NAME" || true
+    echo ""
+    info "Console detached. Continuing to SSH check..."
   else
     # Manual install — check if already SSH-reachable (install may already be done)
     local vm_ip; vm_ip="$(_resolve_vm_ip)"
@@ -297,7 +301,7 @@ wait_for_ssh() {
       return
     fi
     (( attempts++ )) || true
-    if (( attempts % 12 == 0 )); then
+    if [ $(( attempts % 12 )) -eq 0 ]; then
       local elapsed=$(( attempts * 5 / 60 ))
       local vm_state; vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
       printf "\r  [%d min] VM state: %-12s  waiting for SSH...    " "$elapsed" "$vm_state"

@@ -1081,7 +1081,7 @@ test_vm_ssh() {
       return
     fi
     (( attempts++ )) || true
-    if (( attempts % 12 == 0 )); then
+    if [ $(( attempts % 12 )) -eq 0 ]; then
       local elapsed=$(( attempts * 5 / 60 ))
       local vm_state; vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
       printf "\r  [%d min] VM state: %-12s  waiting for SSH...    " "$elapsed" "$vm_state"
