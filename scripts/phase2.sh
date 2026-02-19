@@ -103,6 +103,29 @@ detect_system() {
   echo ""
 }
 
+# Detect OVMF firmware paths — sets globals OVMF_CODE and OVMF_VARS
+detect_ovmf() {
+  local code_candidates=(
+    "/usr/share/edk2/x64/OVMF_CODE.4m.fd"   # Arch / CachyOS / Fedora 39+
+    "/usr/share/edk2/x64/OVMF_CODE.fd"       # Fedora older
+    "/usr/share/OVMF/OVMF_CODE_4M.fd"        # Ubuntu 22.04+
+    "/usr/share/OVMF/x64/OVMF_CODE.fd"       # Ubuntu alt
+    "/usr/share/OVMF/OVMF_CODE.fd"           # Debian / Ubuntu older
+    "/usr/share/edk2/ovmf/OVMF_CODE.fd"      # Fedora alt
+  )
+  local vars_candidates=(
+    "/usr/share/edk2/x64/OVMF_VARS.4m.fd"
+    "/usr/share/edk2/x64/OVMF_VARS.fd"
+    "/usr/share/OVMF/OVMF_VARS_4M.fd"
+    "/usr/share/OVMF/x64/OVMF_VARS.fd"
+    "/usr/share/OVMF/OVMF_VARS.fd"
+    "/usr/share/edk2/ovmf/OVMF_VARS.fd"
+  )
+  OVMF_CODE=""; OVMF_VARS=""
+  for p in "${code_candidates[@]}"; do [ -f "$p" ] && { OVMF_CODE="$p"; break; }; done
+  for p in "${vars_candidates[@]}"; do [ -f "$p" ] && { OVMF_VARS="$p"; break; }; done
+}
+
 check_requirements() {
   section "Requirements Check"
   echo "  Per LongQT-sea/intel-igpu-passthru guide:"
@@ -150,6 +173,26 @@ check_requirements() {
     echo -e "  ${GREEN}✓${RESET} SR-IOV VFs active: ${VF_COUNT} VF(s) on 0000:00:02.0"
   else
     echo -e "  ${YELLOW}!${RESET} SR-IOV VFs not yet active — run phase1 (step 6) + reboot first"
+  fi
+
+  # OVMF (UEFI firmware for VM)
+  detect_ovmf
+  if [ -n "$OVMF_CODE" ] && [ -n "$OVMF_VARS" ]; then
+    echo -e "  ${GREEN}✓${RESET} OVMF: $(basename "$OVMF_CODE")"
+  else
+    echo -e "  ${YELLOW}!${RESET} OVMF not found — installing..."
+    case "${OS:-arch}" in
+      arch)           sudo pacman -S --noconfirm --needed edk2-ovmf ;;
+      ubuntu|proxmox) sudo apt-get install -y ovmf ;;
+      fedora)         sudo dnf install -y edk2-ovmf ;;
+    esac
+    detect_ovmf
+    if [ -n "$OVMF_CODE" ]; then
+      echo -e "  ${GREEN}✓${RESET} OVMF installed: $(basename "$OVMF_CODE")"
+    else
+      warn "OVMF still not found — VM will fail to boot UEFI"
+      warn_count=$((warn_count+1))
+    fi
   fi
 
   echo ""
@@ -642,6 +685,7 @@ VM_OS_VARIANT="${VM_OS_VARIANT}"
 VM_ISO_PATH="${VM_ISO_PATH}"
 VM_ISO_URL="${VM_ISO_URL}"
 VM_ISO_SHA256_URL="${VM_ISO_SHA256_URL}"
+VM_CLOUD_IMG_URL="${VM_CLOUD_IMG_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
 VM_BOOT_ORDER="${VM_BOOT_ORDER:-hd,cdrom}"
 # Autoinstall: yes = cloud-init autoinstall (fully unattended), no = manual
 VM_AUTOINSTALL="${VM_AUTOINSTALL:-yes}"
@@ -862,6 +906,48 @@ generate_autoinstall() {
   ok "Autoinstall user-data written to ${seed_dir}/user-data"
 }
 
+# Generate standard cloud-config user-data (for cloud image / Option 2)
+# NOT autoinstall format — cloud images use plain cloud-init on first boot
+generate_cloud_config() {
+  source_vm_conf
+  local seed_dir="${VM_CONF_DIR}/${VM_NAME}-seed"
+  mkdir -p "$seed_dir"
+
+  info "Generating cloud-config user-data → ${seed_dir}/user-data"
+
+  local pw_hash=""
+  if [ -f "$VM_CONF" ]; then
+    pw_hash="$(grep '^VM_PASSWORD_HASH=' "$VM_CONF" | head -1 | sed 's/^VM_PASSWORD_HASH=//;s/^"//;s/"$//')"
+  fi
+  if [ -z "$pw_hash" ]; then
+    warn "VM_PASSWORD_HASH not set — using default 'changeme123'. Change after first login!"
+    pw_hash="$(openssl passwd -6 'changeme123' 2>/dev/null || echo 'changeme123')"
+  fi
+
+  {
+    printf '#cloud-config\n'
+    printf 'hostname: %s\n' "${VM_HOSTNAME}"
+    printf 'users:\n'
+    printf '  - name: %s\n'            "${VM_USER}"
+    printf '    passwd: "%s"\n'        "${pw_hash}"
+    printf '    lock_passwd: false\n'
+    printf '    sudo: ALL=(ALL) NOPASSWD:ALL\n'
+    printf '    shell: /bin/bash\n'
+    printf '    groups: [adm, sudo]\n'
+    printf 'ssh_pwauth: true\n'
+    printf 'chpasswd:\n'
+    printf '  expire: false\n'
+    printf 'package_update: false\n'
+    printf 'package_upgrade: false\n'
+    printf 'runcmd:\n'
+    printf "  - sed -i 's/^#\\\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config\n"
+    printf '  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true\n'
+  } > "${seed_dir}/user-data"
+
+  : > "${seed_dir}/meta-data"
+  ok "Cloud-config user-data written to ${seed_dir}/user-data"
+}
+
 # Create seed ISO (labeled 'cidata') from user-data + meta-data
 create_seed_iso() {
   source_vm_conf
@@ -895,111 +981,75 @@ create_seed_iso() {
 create_vm() {
   section "Create VM"
   source_vm_conf
+  detect_ovmf
+
+  [ -n "$OVMF_CODE" ] || { err "OVMF firmware not found — run check_requirements first"; return 1; }
 
   sudo mkdir -p "$(dirname "$VM_DISK_PATH")" "$SHARED_DIR"
   sudo chown -R "${CURRENT_USER}:${CURRENT_USER}" "$SHARED_DIR"
   sudo virsh net-autostart default >/dev/null 2>&1 || true
   sudo virsh net-start default >/dev/null 2>&1 || true
 
-  # ── Ensure ISOs are readable by libvirt-qemu ──────────────────────────────
-  # libvirt-qemu needs execute on every directory in the path and read on files.
-  # Safest fix: copy ISOs under /var/lib/libvirt/images/ which is always accessible.
-  _ensure_libvirt_readable() {
-    local src="$1"
-    [ -f "$src" ] || return 0
-    # Already under a libvirt-accessible path — return as-is
-    if echo "$src" | grep -qE "^/var/lib/libvirt|^/tmp|^/root"; then
-      echo "$src"; return 0
-    fi
-    local dest="/var/lib/libvirt/images/$(basename "$src")"
-    if [ ! -f "$dest" ]; then
-      # Print to stderr so it doesn't pollute the $() capture
-      info "Copying $(basename "$src") → ${dest}  (libvirt-qemu needs access)" >&2
-      sudo cp "$src" "$dest"
-      sudo chmod 644 "$dest"
-    fi
-    echo "$dest"
-  }
-
-  local iso_path
-  iso_path="$(_ensure_libvirt_readable "$VM_ISO_PATH")"
-  [ -z "$iso_path" ] && iso_path="$VM_ISO_PATH"
-
   if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-    ok "VM '${VM_NAME}' already exists. Skipping virt-install."
+    ok "VM '${VM_NAME}' already exists. Skipping."
   else
-    # ── Generate autoinstall user-data and serve via HTTP ─────────────────────
-    # Official Canonical method: serve user-data over HTTP from host.
-    # The VM reaches the host via the libvirt bridge gateway (192.168.122.1).
-    # --cloud-init with --location is bugged on non-Ubuntu virt-install builds
-    # (Launchpad #2073461) — HTTP avoids that entirely.
-    local http_pid="" http_port=3003
-    if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-      generate_autoinstall
-      local seed_dir="${VM_CONF_DIR}/${VM_NAME}-seed"
-      # Pick a free port
-      while ss -tlnp 2>/dev/null | grep -q ":${http_port} "; do
-        (( http_port++ )) || true
-      done
-      # Open firewall port on virbr0 — INPUT policy is DROP by default on CachyOS
-      sudo iptables -I INPUT -i virbr0 -p tcp --dport "$http_port" -j ACCEPT 2>/dev/null || true
-      python3 -m http.server "$http_port" --directory "$seed_dir" \
-        --bind 192.168.122.1 2>&1 | grep -v "^$" &
-      http_pid=$!
-      info "Serving cloud-init data at http://192.168.122.1:${http_port}/ (pid ${http_pid})"
-      info "Ubuntu autoinstall enabled — installation will run unattended (~10-15 min)"
+    # ── Option 2: Cloud image — download pre-installed image, boot in ~30s ──
+    local cloud_img_url="${VM_CLOUD_IMG_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
+    local cloud_img_name; cloud_img_name="$(basename "$cloud_img_url")"
+    local cloud_img_cache="${VM_CONF_DIR}/${cloud_img_name}"
+
+    # Download cloud image (cached — only downloaded once)
+    if [ ! -f "$cloud_img_cache" ]; then
+      info "Downloading Ubuntu cloud image (~600MB)..."
+      info "  ${cloud_img_url}"
+      wget -q --show-progress -O "${cloud_img_cache}.tmp" "$cloud_img_url" \
+        && mv "${cloud_img_cache}.tmp" "$cloud_img_cache" \
+        || { rm -f "${cloud_img_cache}.tmp"; err "Download failed"; return 1; }
+    else
+      ok "Cloud image cached: ${cloud_img_cache}"
     fi
 
-    # Machine type must be pc (i440fx) for legacy IGD passthrough — NOT q35
-    # --location extracts kernel/initrd from ISO for extra-args injection
-    # ds=nocloud-net: cloud-init fetches user-data/meta-data via HTTP from host gateway
-    # _gateway resolves to default route inside the installer (192.168.122.1)
-    local extra_args="autoinstall"
-    [ "${VM_AUTOINSTALL:-yes}" = "yes" ] && extra_args="autoinstall ds=nocloud-net;s=http://192.168.122.1:${http_port}/"
+    # Convert + resize to VM disk path
+    info "Creating ${VM_DISK_GB}GB VM disk from cloud image..."
+    sudo qemu-img convert -O qcow2 "$cloud_img_cache" "$VM_DISK_PATH"
+    sudo qemu-img resize "$VM_DISK_PATH" "${VM_DISK_GB}G"
+    sudo chmod 644 "$VM_DISK_PATH"
+    ok "VM disk: ${VM_DISK_PATH}"
 
+    # Generate cloud-config seed ISO (configures user, SSH, hostname on first boot)
+    generate_cloud_config
+    create_seed_iso
+    local seed_iso_dest="/var/lib/libvirt/images/${VM_NAME}-seed.iso"
+    sudo cp "${VM_CONF_DIR}/${VM_NAME}-seed.iso" "$seed_iso_dest"
+    sudo chmod 644 "$seed_iso_dest"
+
+    # Import into libvirt with explicit OVMF UEFI firmware
+    # --boot loader=... is explicit so it works regardless of libvirt distro defaults
+    # Seed ISO is attached as CDROM — cloud-init reads it on first boot, then VM reboots
+    info "Importing VM into libvirt (UEFI: $(basename "$OVMF_CODE"))..."
     if ! sudo virt-install \
       --name "$VM_NAME" \
       --memory "$VM_RAM_MB" \
       --vcpus "$VM_VCPUS" \
       --cpu "${VM_CPU_MODEL:-host-passthrough}" \
       --machine "${VM_MACHINE_TYPE:-pc}" \
-      --boot "${VM_FIRMWARE:-uefi}" \
-      --disk "path=${VM_DISK_PATH},size=${VM_DISK_GB},format=${VM_DISK_FORMAT:-qcow2},bus=${VM_DISK_BUS:-virtio}" \
+      --boot "loader=${OVMF_CODE},loader.readonly=yes,loader.type=pflash,nvram.template=${OVMF_VARS}" \
+      --disk "path=${VM_DISK_PATH},format=${VM_DISK_FORMAT:-qcow2},bus=${VM_DISK_BUS:-virtio}" \
+      --disk "path=${seed_iso_dest},device=cdrom,bus=sata" \
       --os-variant "$VM_OS_VARIANT" \
       --network "network=${VM_NET_SOURCE:-default},model=${VM_NET_MODEL:-virtio}" \
       --graphics "${VM_GRAPHICS:-none}" \
       --video "${VM_VIDEO:-none}" \
-      --console "${VM_CONSOLE:-pty,target_type=serial}" \
-      --location "${iso_path},kernel=casper/vmlinuz,initrd=casper/initrd" \
-      --extra-args "$extra_args" \
+      --import \
       --noautoconsole; then
-      err "virt-install failed! Check the error above."
-      err "Common fixes: missing OVMF firmware, invalid ISO path, or libvirtd not running."
-      err "  ISO path:   ${iso_path}"
-      err "  Disk path:  ${VM_DISK_PATH}"
-      err "  VM name:    ${VM_NAME}"
-      [ -n "$http_pid" ] && kill "$http_pid" 2>/dev/null || true
-      [ -f "$VM_DISK_PATH" ] && sudo rm -f "$VM_DISK_PATH" && warn "Removed partial disk: ${VM_DISK_PATH}"
+      err "virt-install failed!"
+      err "  Disk:  ${VM_DISK_PATH}"
+      err "  OVMF:  ${OVMF_CODE}"
+      sudo rm -f "$VM_DISK_PATH" 2>/dev/null || true
       sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || sudo virsh undefine "$VM_NAME" 2>/dev/null || true
       return 1
     fi
-
-    # Keep HTTP server up for 5 min — UEFI boot + initramfs takes ~2-3 min before cloud-init runs
-    if [ -n "$http_pid" ]; then
-      info "Waiting for cloud-init to fetch autoinstall data (up to 5 min)..."
-      sleep 300
-      kill "$http_pid" 2>/dev/null || true
-      sudo iptables -D INPUT -i virbr0 -p tcp --dport "$http_port" -j ACCEPT 2>/dev/null || true
-      info "cloud-init HTTP server stopped, firewall rule removed."
-    fi
-
-    if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-      ok "VM created. Ubuntu autoinstall running silently in background (~10-15 min)."
-      info "Subiquity (Ubuntu installer) does not output to serial — this is normal."
-      info "SSH poll below will detect completion automatically."
-    else
-      ok "VM created. Complete Ubuntu installer via: sudo virsh console ${VM_NAME}"
-    fi
+    ok "VM imported. cloud-init configuring on first boot (~1-2 min then auto-reboot)."
   fi
 
   # ── virtiofs shared storage ────────────────────────────────────────────────
@@ -1075,11 +1125,9 @@ test_vm_ssh() {
   source_vm_conf
 
   local vm_ip="${VM_STATIC_IP%/*}"
-  local max=180  # up to 15 min for autoinstall
-  [ "${VM_AUTOINSTALL:-yes}" != "yes" ] && max=12  # 1 min if manual (already confirmed)
-
-  info "Polling SSH at ${VM_USER}@${vm_ip} (up to $(( max * 5 / 60 )) min)..."
-  info "Ubuntu autoinstall runs silently (~10-15 min). SSH will appear when done."
+  local max=24   # 2 min for cloud-image (cloud-init runs fast, then VM reboots)
+  info "Polling SSH at ${VM_USER}@${vm_ip} (up to ~2 min)..."
+  info "cloud-init configures on first boot then reboots — SSH appears after reboot."
 
   local attempts=0
   while [ $attempts -lt $max ]; do
