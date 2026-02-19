@@ -696,6 +696,7 @@ VM_SEED_ISO="${VM_SEED_ISO:-${VM_CONF_DIR}/${VM_NAME}-seed.iso}"
 VM_NET_TYPE="${VM_NET_TYPE:-network}"
 VM_NET_SOURCE="${VM_NET_SOURCE:-default}"
 VM_NET_MODEL="${VM_NET_MODEL:-virtio}"
+VM_NET_IFACE="${VM_NET_IFACE:-ens2}"
 VM_STATIC_IP="${VM_STATIC_IP}"
 VM_GATEWAY="${VM_GATEWAY}"
 VM_DNS="${VM_DNS}"
@@ -958,16 +959,18 @@ generate_cloud_config() {
     printf '  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true\n'
   } > "${seed_dir}/user-data"
 
-  # network-config: set static IP via netplan (read by cloud-init from seed ISO)
+  # network-config v2: static IP using explicit interface name (virtio-net on pc = ens2)
+  # Format mirrors rev5.7 netplan approach — interface name is predictable for this setup
   local vm_ip="${VM_STATIC_IP%/*}"
   local vm_prefix="${VM_STATIC_IP#*/}"
+  local vm_iface="${VM_NET_IFACE:-ens2}"
   {
     printf 'version: 2\n'
     printf 'ethernets:\n'
-    printf '  id0:\n'
-    printf '    match: {}\n'
+    printf '  %s:\n' "${vm_iface}"
     printf '    dhcp4: false\n'
-    printf '    addresses: [%s/%s]\n' "${vm_ip}" "${vm_prefix}"
+    printf '    addresses:\n'
+    printf '      - %s/%s\n' "${vm_ip}" "${vm_prefix}"
     printf '    routes:\n'
     printf '      - to: default\n'
     printf '        via: %s\n' "${VM_GATEWAY}"
@@ -1170,8 +1173,8 @@ test_vm_ssh() {
   source_vm_conf
 
   local vm_ip="${VM_STATIC_IP%/*}"
-  local max=24   # 2 min for cloud-image (cloud-init runs fast, then VM reboots)
-  info "Polling SSH at ${VM_USER}@${vm_ip} (up to ~2 min)..."
+  local max=60   # 5 min — cloud-init takes ~2 min, allow buffer for slow boot
+  info "Polling SSH at ${VM_USER}@${vm_ip} (up to ~5 min)..."
   info "cloud-init configures on first boot then reboots — SSH appears after reboot."
 
   # Stream VM serial console output (cloud-init logs visible in real time)
