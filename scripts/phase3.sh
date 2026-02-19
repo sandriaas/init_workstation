@@ -651,8 +651,15 @@ main() {
   # Step 2: poll SSH until reachable
   wait_for_ssh
 
-  # Steps 3–8: configure VM internals over SSH
-  run_remote_setup
+  # Steps 3–8: configure VM internals over SSH — skip if already done
+  local _cf_running; _cf_running="$(ssh -T -o StrictHostKeyChecking=accept-new \
+    -o ConnectTimeout=5 -o BatchMode=yes "${VM_SSH_USER}@${VM_SSH_HOST}" \
+    "systemctl is-active cloudflared 2>/dev/null || echo inactive" 2>/dev/null || echo inactive)"
+  if [ "$_cf_running" = "active" ]; then
+    ok "VM already configured (cloudflared active) — skipping remote setup."
+  else
+    run_remote_setup
+  fi
 
   # Write tunnel info back to conf
   update_vm_conf
