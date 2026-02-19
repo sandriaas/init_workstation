@@ -81,11 +81,14 @@ else
 fi
 
 # Sleep disabled
-if systemctl is-masked sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null | grep -q "masked"; then
-  pass "System sleep masked"
-else
-  flag "Sleep not fully masked — server may suspend (run phase1 step 2)"
-fi
+# Note: 'systemctl is-masked' exit code is unreliable on some systemd versions;
+# use 'show --property=LoadState' instead.
+ALL_MASKED=true
+for _unit in sleep.target suspend.target hibernate.target hybrid-sleep.target; do
+  _state="$(systemctl show "$_unit" --property=LoadState 2>/dev/null | cut -d= -f2)"
+  [ "$_state" = "masked" ] || { ALL_MASKED=false; break; }
+done
+$ALL_MASKED && pass "System sleep masked" || flag "Sleep not fully masked — server may suspend (run phase1 step 2)"
 
 # Static IP
 CURRENT_IP="$(ip -4 addr show $(ip route | awk '/default/{print $5; exit}') 2>/dev/null | awk '/inet /{print $2}' | head -1 || true)"
@@ -214,10 +217,10 @@ fi
 
 # GPU PCI driver usage (only meaningful when VFs are live)
 if [ "${LIVE_VFS}" -gt 0 ] 2>/dev/null; then
-  PF_DRIVER="$(cat /sys/devices/pci0000:00/0000:00:02.0/driver/module/drivers 2>/dev/null | grep -o 'i915\|vfio' | head -1 || true)"
-  VF_DRIVER="$(cat /sys/devices/pci0000:00/0000:00:02.1/driver/module/drivers 2>/dev/null | grep -o 'vfio' | head -1 || true)"
-  [ "${PF_DRIVER:-}" = "i915" ] && pass "PF (00:02.0) driver: i915 ✓" || flag "PF driver: ${PF_DRIVER:-unknown}"
-  [ "${VF_DRIVER:-}" = "vfio" ] && pass "VF (00:02.1) driver: vfio-pci ✓" || flag "VF driver: ${VF_DRIVER:-unknown (reboot or VF not bound)}"
+  PF_DRIVER="$(basename "$(readlink /sys/bus/pci/devices/0000:00:02.0/driver 2>/dev/null)" 2>/dev/null || true)"
+  VF_DRIVER="$(basename "$(readlink /sys/bus/pci/devices/0000:00:02.1/driver 2>/dev/null)" 2>/dev/null || true)"
+  [ "${PF_DRIVER:-}" = "i915" ]    && pass "PF (00:02.0) driver: i915 ✓"           || flag "PF driver: ${PF_DRIVER:-unknown}"
+  [ "${VF_DRIVER:-}" = "vfio-pci" ] && pass "VF (00:02.1) driver: vfio-pci ✓"      || flag "VF driver: ${VF_DRIVER:-unknown (reboot or VF not bound)}"
 fi
 
 # /dev/dri
