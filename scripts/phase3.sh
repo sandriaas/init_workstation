@@ -80,16 +80,17 @@ select_conf() {
   [ -f "$_STATE" ] && source "$_STATE" 2>/dev/null || true
 
   # ── Installed VMs from virsh ───────────────────────────────────────────────
-  local -a VM_NAMES VM_STATES
+  local -a VM_NAMES=() VM_STATES=()
   while IFS= read -r line; do
     local name state
     name="$(echo "$line" | awk '{print $2}')"
-    state="$(echo "$line" | awk '{$1=$2=""; print $0}' | xargs)"
+    state="$(echo "$line" | awk '{$1=$2=""; print $0}' | xargs || true)"
     [ -z "$name" ] || [ "$name" = "Name" ] && continue
     VM_NAMES+=("$name"); VM_STATES+=("$state")
   done < <(virsh list --all 2>/dev/null | tail -n +3 || true)
 
   # ── Available conf files ───────────────────────────────────────────────────
+  local -a EXISTING=()
   mapfile -t EXISTING < <(ls "${VM_CONF_DIR}"/*.conf 2>/dev/null || true)
 
   if [ ${#VM_NAMES[@]} -eq 0 ] && [ ${#EXISTING[@]} -eq 0 ]; then
@@ -111,10 +112,12 @@ select_conf() {
       local state="${VM_STATES[$v]:-}"
       local conf_file=""
       # Find matching conf file
-      for f in "${EXISTING[@]}"; do
-        local fn; fn="$(basename "$f" .conf)"
-        [ "$fn" = "$name" ] && { conf_file="$f"; break; }
-      done
+      if [ ${#EXISTING[@]} -gt 0 ]; then
+        for f in "${EXISTING[@]}"; do
+          local fn; fn="$(basename "$f" .conf)"
+          [ "$fn" = "$name" ] && { conf_file="$f"; break; }
+        done
+      fi
       local conf_hint=""; [ -n "$conf_file" ] && conf_hint="  ${CYAN}[conf: $(basename "$conf_file")]${RESET}"
       local mark=""
       [ "${name}" = "${LAST_VM_NAME:-}" ] && { mark=" ${YELLOW}← last used${RESET}"; default_idx=$idx; }
@@ -125,16 +128,20 @@ select_conf() {
   fi
 
   # Conf files with no matching virsh VM
-  for f in "${EXISTING[@]}"; do
-    local fn; fn="$(basename "$f" .conf)"
-    local already=0
-    for name in "${VM_NAMES[@]}"; do [ "$name" = "$fn" ] && already=1; done
-    if [ $already -eq 0 ]; then
-      echo -e "    ${BOLD}${idx})${RESET} ${fn}  ${YELLOW}(conf only — not yet installed)${RESET}"
-      CHOICES+=("$fn"); CONF_MAP+=("$f")
-      (( idx++ ))
-    fi
-  done
+  if [ ${#EXISTING[@]} -gt 0 ]; then
+    for f in "${EXISTING[@]}"; do
+      local fn; fn="$(basename "$f" .conf)"
+      local already=0
+      if [ ${#VM_NAMES[@]} -gt 0 ]; then
+        for name in "${VM_NAMES[@]}"; do [ "$name" = "$fn" ] && already=1; done
+      fi
+      if [ $already -eq 0 ]; then
+        echo -e "    ${BOLD}${idx})${RESET} ${fn}  ${YELLOW}(conf only — not yet installed)${RESET}"
+        CHOICES+=("$fn"); CONF_MAP+=("$f")
+        (( idx++ ))
+      fi
+    done
+  fi
 
   echo ""
   ask "Select VM to configure [1-$((idx-1)), default=${default_idx}]: "; read -r _sel
@@ -156,8 +163,11 @@ select_conf() {
     fi
   fi
 
+  # Temporarily disable nounset — conf file contains SHA-512 hash with $6$ literal
+  set +u
   # shellcheck disable=SC1090
   source "$VM_CONF"
+  set -u
   VM_CONF_DIR="$(dirname "$VM_CONF")"
   ok "Selected VM: ${VM_NAME}  (conf: $(basename "$VM_CONF"))"
   info "${VM_VCPUS} vCPU  •  $(( VM_RAM_MB / 1024 )) GB RAM  •  ${VM_STATIC_IP%/*}  •  tunnel: ${VM_TUNNEL_HOST:-not set}"
