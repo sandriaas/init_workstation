@@ -299,8 +299,8 @@ prompt_gpu() {
   echo "  9   Alder/Raptor Lake H/P/U mobile  Core i3/5/7/9 12xxx-14xxx H/P/U  <- i9-12900H (Intel Iris Xe)"
   echo " 10   Jasper Lake                     Pentium/Celeron N 4xxx/5xxx/6xxx"
   echo " 11   Alder Lake-N / Twin Lake        N-series"
-  echo " 12   Arrow/Meteor Lake               Core Ultra (xe driver)"
-  echo " 13   Lunar Lake                      Core Ultra 2xx (xe driver)"
+  echo " 12   Arrow/Meteor Lake               Core Ultra (i915 — xe unsupported for MTL)"
+  echo " 13   Lunar Lake                      Core Ultra 2xx (i915 — xe unsupported for LNL)"
   ask "Selection [9]: "; read -r GPU_GEN
   GPU_GEN="$(default_if_empty "$GPU_GEN" "9")"
 
@@ -328,16 +328,31 @@ prompt_gpu() {
     9)  GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-H_RPL-H_GOPv21_igd.rom";  GPU_IGD_LPC="yes" ;;
     10) GPU_DRIVER="i915"; GPU_ROM_FILE="JSL_GOPv18_igd.rom";           GPU_IGD_LPC="no"  ;;
     11) GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-N_TWL_GOPv21_igd.rom";    GPU_IGD_LPC="yes" ;;
-    12) GPU_DRIVER="xe";   GPU_ROM_FILE="ARL_MTL_GOPv22_igd.rom";       GPU_IGD_LPC="yes" ;;
-    13) GPU_DRIVER="xe";   GPU_ROM_FILE="LNL_GOPv2X_igd.rom";           GPU_IGD_LPC="yes" ;;
+    12) GPU_DRIVER="i915"; GPU_ROM_FILE="ARL_MTL_GOPv22_igd.rom";       GPU_IGD_LPC="yes" ;;
+    13) GPU_DRIVER="i915"; GPU_ROM_FILE="LNL_GOPv2X_igd.rom";           GPU_IGD_LPC="yes" ;;
     *)  GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-H_RPL-H_GOPv21_igd.rom";  GPU_IGD_LPC="yes" ;;
   esac
   GPU_ROM_URL="https://github.com/LongQT-sea/intel-igpu-passthru/releases/download/v0.1/${GPU_ROM_FILE}"
 
   if [ "$GPU_DRIVER" = "xe" ]; then
-    KERNEL_GPU_ARGS="xe.max_vfs=${GPU_VF_COUNT} module_blacklist=i915"
+    # xe.force_probe required: value = output of: cat /sys/devices/pci0000:00/0000:00:02.0/device
+    XE_PROBE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//' || true)"
+    XE_PROBE_ID="${XE_PROBE_ID:-$(ask "Enter device ID for xe.force_probe (cat /sys/devices/pci0000:00/0000:00:02.0/device | sed s/0x//): "; read -r _p; echo "$_p")}"
+    KERNEL_GPU_ARGS="xe.max_vfs=${GPU_VF_COUNT} xe.force_probe=${XE_PROBE_ID} module_blacklist=i915"
   else
     KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe"
+  fi
+
+  # QEMU legacy-mode restriction warning (QEMU 10.1+ restricts to SNB→CML per LongQT-sea guide fn[4])
+  QEMU_VER="$(qemu-system-x86_64 --version 2>/dev/null | awk '/QEMU emulator/{print $4}' | cut -d. -f1,2 || true)"
+  QEMU_MAJOR="$(echo "${QEMU_VER:-0.0}" | cut -d. -f1)"
+  QEMU_MINOR="$(echo "${QEMU_VER:-0.0}" | cut -d. -f2)"
+  if { [ "$QEMU_MAJOR" -gt 10 ] || { [ "$QEMU_MAJOR" -eq 10 ] && [ "$QEMU_MINOR" -ge 1 ]; }; } \
+     && [ "${GPU_IGD_LPC:-no}" = "yes" ]; then
+    warn "QEMU ${QEMU_VER} detected. QEMU 10.1+ restricts legacy IGD mode to Sandy Bridge → Comet Lake."
+    warn "Alder Lake / Raptor Lake may require UPT mode instead of legacy mode."
+    warn "See: https://github.com/LongQT-sea/intel-igpu-passthru (footnote 4)"
+    warn "If passthrough fails, try removing --machine pc and switching to UPT mode."
   fi
 
   GPU_PCI_ID_DETECTED="$(lspci -Dnn | awk '/VGA compatible controller|Display controller/ && /Intel/{print $1; exit}')"
@@ -462,6 +477,14 @@ source_vm_conf() {
 install_sriov_host() {
   [ "${GPU_PASSTHROUGH}" = "yes" ] || return 0
   section "Host SR-IOV Setup (${GPU_DRIVER})"
+
+  # Guide warning: remove disable_vga=1 if present (breaks IGD passthrough)
+  if grep -qr 'disable_vga=1' /etc/modprobe.d/ /etc/default/grub /etc/default/limine 2>/dev/null; then
+    warn "Found 'disable_vga=1' in your config — this BREAKS iGPU passthrough!"
+    warn "Removing it now (per LongQT-sea/intel-igpu-passthru requirements)..."
+    sudo find /etc/modprobe.d/ -type f -exec sudo sed -i 's/disable_vga=1//g' {} + 2>/dev/null || true
+    sudo sed -i 's/disable_vga=1//g' /etc/default/grub /etc/default/limine 2>/dev/null || true
+  fi
 
   case "$OS" in
     arch)
@@ -590,6 +613,8 @@ EOF
     <address domain='0x${PF_DOMAIN}' bus='0x${PF_BUS}' slot='0x${PF_SLOT}' function='0x${VF_FUNCTION}'/>
   </source>
   <rom file='${GPU_ROM_PATH}'/>
+  <alias name='hostpci0'/>
+  <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
 </hostdev>
 EOF
     sudo virsh attach-device "$VM_NAME" "$TMP_VF_XML" --config >/dev/null 2>&1 \

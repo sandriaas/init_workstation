@@ -60,11 +60,28 @@ fi
 
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update
-  apt-get install -y curl wget openssh-server fail2ban net-tools cloud-init
+  apt-get install -y curl wget openssh-server fail2ban net-tools cloud-init dkms linux-headers-$(uname -r) build-essential
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y curl wget openssh-server fail2ban net-tools
+  dnf install -y curl wget openssh-server fail2ban net-tools dkms kernel-devel-$(uname -r)
 elif command -v pacman >/dev/null 2>&1; then
-  pacman -Syu --noconfirm --needed curl wget openssh fail2ban net-tools
+  pacman -Syu --noconfirm --needed curl wget openssh fail2ban net-tools dkms linux-headers
+fi
+
+# i915-sriov-dkms must be installed in guest too (strongtz/i915-sriov-dkms requirement)
+echo "== Installing i915-sriov-dkms in guest (required for SR-IOV VF to work in guest) =="
+if command -v apt-get >/dev/null 2>&1; then
+  SRIOV_DEB_URL="$(curl -fsSL https://api.github.com/repos/strongtz/i915-sriov-dkms/releases/latest \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(a["browser_download_url"] for a in d["assets"] if a["name"].endswith("_amd64.deb")))' 2>/dev/null || true)"
+  if [ -n "${SRIOV_DEB_URL:-}" ]; then
+    curl -fL "$SRIOV_DEB_URL" -o /tmp/i915-sriov-dkms.deb
+    dpkg -i /tmp/i915-sriov-dkms.deb || apt-get install -f -y
+    echo "i915-sriov-dkms installed in guest."
+  else
+    echo "WARNING: Could not fetch i915-sriov-dkms .deb — install manually:"
+    echo "  https://github.com/strongtz/i915-sriov-dkms/releases"
+  fi
+elif command -v pacman >/dev/null 2>&1 && command -v paru >/dev/null 2>&1; then
+  paru -S --noconfirm --needed i915-sriov-dkms
 fi
 
 if ! command -v cloudflared >/dev/null 2>&1; then
