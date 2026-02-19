@@ -64,9 +64,9 @@ pkg_update() {
 
 get_packages() {
   case $OS in
-    arch)           echo "git base-devel curl wget htop net-tools openssh docker docker-compose cloudflared sysfsutils fail2ban lm_sensors websocat micro" ;;
-    ubuntu|proxmox) echo "git build-essential curl wget htop net-tools openssh-server docker.io docker-compose fail2ban lm-sensors" ;;
-    fedora)         echo "git curl wget htop net-tools openssh-server docker docker-compose fail2ban lm_sensors" ;;
+    arch)           echo "git base-devel curl wget htop net-tools openssh docker docker-compose cloudflared sysfsutils fail2ban lm_sensors websocat micro qemu-full libvirt virt-manager cockpit cockpit-machines dnsmasq bridge-utils" ;;
+    ubuntu|proxmox) echo "git build-essential curl wget htop net-tools openssh-server docker.io docker-compose fail2ban lm-sensors qemu-kvm libvirt-daemon-system libvirt-clients virt-manager cockpit cockpit-machines dnsmasq-base bridge-utils" ;;
+    fedora)         echo "git curl wget htop net-tools openssh-server docker docker-compose fail2ban lm_sensors qemu-kvm libvirt virt-install virt-manager cockpit cockpit-machines dnsmasq bridge-utils" ;;
   esac
 }
 
@@ -114,13 +114,25 @@ step_packages() {
   sudo systemctl enable --now sshd 2>/dev/null || sudo systemctl enable --now ssh 2>/dev/null || true
   sudo systemctl enable --now docker
   sudo systemctl enable --now fail2ban
+  sudo systemctl enable --now libvirtd.socket 2>/dev/null || sudo systemctl enable --now libvirtd 2>/dev/null || true
+  sudo systemctl enable --now cockpit.socket 2>/dev/null || true
 
-  # Add user to docker group (active after reboot)
-  if ! groups "$CURRENT_USER" | grep -q '\bdocker\b'; then
-    sudo usermod -aG docker "$CURRENT_USER"
-    ok "Added $CURRENT_USER to docker group (active after reboot)"
-  else
-    ok "$CURRENT_USER already in docker group"
+  # Add user to required groups (active after reboot)
+  for grp in docker libvirt kvm; do
+    if getent group "$grp" >/dev/null 2>&1; then
+      if ! groups "$CURRENT_USER" | grep -q "\\b${grp}\\b"; then
+        sudo usermod -aG "$grp" "$CURRENT_USER"
+        ok "Added $CURRENT_USER to $grp group (active after reboot)"
+      else
+        ok "$CURRENT_USER already in $grp group"
+      fi
+    fi
+  done
+
+  if command -v virsh >/dev/null 2>&1; then
+    sudo virsh net-autostart default >/dev/null 2>&1 || true
+    sudo virsh net-start default >/dev/null 2>&1 || true
+    ok "libvirt default network ensured"
   fi
 
   command -v sensors-detect &>/dev/null && sudo sensors-detect --auto || true
@@ -132,34 +144,35 @@ step_packages() {
 # =============================================================================
 step_iommu() {
   section "Step 2: IOMMU Kernel Parameters"
+  IOMMU_ARGS="intel_iommu=on iommu=pt i915.enable_guc=3 i915.max_vfs=7 module_blacklist=xe"
 
-  # Skip if already active in running kernel
-  if grep -q "intel_iommu=on" /proc/cmdline 2>/dev/null; then
-    ok "IOMMU already active in running kernel. Skipping."; return
+  # Skip only if full parameter set is active in running kernel
+  if grep -q "intel_iommu=on" /proc/cmdline 2>/dev/null && grep -q "i915.max_vfs=" /proc/cmdline 2>/dev/null; then
+    ok "IOMMU + SR-IOV args already active in running kernel. Skipping."; return
   fi
 
-  confirm "Enable IOMMU (intel_iommu=on iommu=pt) in bootloader?" || { info "Skipped."; return; }
+  confirm "Enable IOMMU + Intel SR-IOV args in bootloader?" || { info "Skipped."; return; }
 
   if [ -f /etc/default/limine ]; then
     info "Bootloader: Limine (CachyOS)"
     # Skip sed if already patched — prevents double-patch on re-run
-    if grep -q "intel_iommu=on" /etc/default/limine; then
+    if grep -q "i915.max_vfs=" /etc/default/limine; then
       ok "Already patched in /etc/default/limine — regenerating bootloader only..."
     else
       sudo cp /etc/default/limine /etc/default/limine.bak
       # Patch ALL KERNEL_CMDLINE entries (default + any named kernels e.g. lts, zen, hardened)
-      sudo sed -i 's/\(KERNEL_CMDLINE\[[^]]*\]+="[^"]*\)"/\1 intel_iommu=on iommu=pt"/g' /etc/default/limine
+      sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${IOMMU_ARGS}\"/g" /etc/default/limine
     fi
     sudo limine-install
     ok "Limine updated — applied to all kernel entries. Active after reboot."
 
   elif [ -f /etc/default/grub ]; then
     info "Bootloader: GRUB"
-    if grep -q "intel_iommu=on" /etc/default/grub; then
+    if grep -q "i915.max_vfs=" /etc/default/grub; then
       ok "Already patched in /etc/default/grub — regenerating only..."
     else
       sudo cp /etc/default/grub /etc/default/grub.bak
-      sudo sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 intel_iommu=on iommu=pt"/' /etc/default/grub
+      sudo sed -i "s/\\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\\)\"/\\1 ${IOMMU_ARGS}\"/" /etc/default/grub
     fi
     case $OS in
       arch)           sudo grub-mkconfig -o /boot/grub/grub.cfg ;;
@@ -172,16 +185,16 @@ step_iommu() {
     # Patch all entry .conf files in /boot/loader/entries/
     info "Bootloader: systemd-boot — patching all entries..."
     for entry in /boot/loader/entries/*.conf; do
-      if grep -q "intel_iommu=on" "$entry" 2>/dev/null; then
+      if grep -q "i915.max_vfs=" "$entry" 2>/dev/null; then
         ok "Already patched: $entry"
       else
-        sudo sed -i 's/\(options.*\)/\1 intel_iommu=on iommu=pt/' "$entry"
+         sudo sed -i "s/\\(options.*\\)/\\1 ${IOMMU_ARGS}/" "$entry"
         ok "Patched: $entry"
       fi
     done
 
   else
-    warn "Unknown bootloader — add 'intel_iommu=on iommu=pt' to kernel cmdline manually."
+    warn "Unknown bootloader — add '${IOMMU_ARGS}' to kernel cmdline manually."
   fi
 
   info "Verify after reboot: cat /proc/cmdline | grep iommu"

@@ -9,10 +9,11 @@
 
 1. [Phase 0 — Pre-Install Prep + BIOS](#phase-0--pre-install-prep--bios)
 2. [Phase 1 — Host Setup Script](#phase-1--host-setup-script)
-3. [SSH from Phone / Other Devices](#ssh-from-phone--other-devices)
-4. [Config File Backups](#config-file-backups)
-5. [Current Status](#current-status)
-6. [Next Steps](#next-steps)
+3. [Phase 2/3 — VM Provision + VM Setup](#phase-23--vm-provision--vm-setup)
+4. [SSH from Phone / Other Devices](#ssh-from-phone--other-devices)
+5. [Config File Backups](#config-file-backups)
+6. [Current Status](#current-status)
+7. [Next Steps](#next-steps)
 
 ---
 
@@ -75,8 +76,8 @@ The script will:
 
 | Step | What it does |
 |------|--------------|
-| **1. Packages & Services** | System update, installs all required packages (distro-aware), enables sshd/docker/fail2ban, adds user to docker group |
-| **2. IOMMU** | Detects bootloader (Limine/GRUB/systemd-boot), patches kernel cmdline with `intel_iommu=on iommu=pt`, regenerates bootloader |
+| **1. Packages & Services** | System update, installs required packages + virt stack (`qemu/libvirt/virt-manager/cockpit`), enables sshd/docker/fail2ban/libvirtd/cockpit, adds user to docker/libvirt/kvm groups |
+| **2. IOMMU** | Detects bootloader (Limine/GRUB/systemd-boot), patches kernel cmdline with `intel_iommu=on iommu=pt i915.enable_guc=3 i915.max_vfs=7 module_blacklist=xe`, regenerates bootloader |
 | **3. Disable Sleep** | Masks all sleep/suspend/hibernate targets so the server never suspends |
 | **4. Static IP** | Detects interface + gateway, asks for desired static IP/gateway/DNS, applies via NetworkManager or Netplan |
 | **5. SSH Setup** | Ensures sshd is active, explicitly enables password authentication |
@@ -91,6 +92,25 @@ cat /proc/cmdline | grep iommu      # → intel_iommu=on iommu=pt
 docker run --rm hello-world         # → works without sudo
 systemctl status cloudflared        # → active (running)
 ```
+
+---
+
+## Phase 2/3 — VM Provision + VM Setup
+
+Use these scripts in order:
+
+```bash
+# Phase 2: create VM + vm.conf + virtiofs + SR-IOV host prep
+bash scripts/phase2.sh
+
+# Phase 3: configure inside VM (SSH, static IP, cloudflared, websocat)
+bash scripts/phase3.sh
+
+# Client side for VM tunnel
+bash scripts/phase2-client.sh
+```
+
+`phase2.sh` writes `configs/vm.conf` and `phase3.sh` reuses it.
 
 ---
 
@@ -175,5 +195,5 @@ Copies saved in `configs/` for reference and restore.
 |----------|--------|
 | **Now** | `sudo reboot` → activate IOMMU + docker group |
 | **Verify** | `cat /proc/cmdline \| grep iommu` · `docker run --rm hello-world` · `systemctl status cloudflared` |
-| **Phase 2** | Build isolated Ubuntu Server KVM VM (see guide Phase 2) |
+| **Phase 2/3** | Run `phase2.sh` then `phase3.sh` for VM + tunnel setup |
 | **Phase 5** | Security hardening — fail2ban tuning, UFW |
