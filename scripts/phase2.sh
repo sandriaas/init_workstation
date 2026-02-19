@@ -178,17 +178,21 @@ prompt_network_and_share() {
 prompt_gpu() {
   section "Step 4: Intel iGPU SR-IOV"
   echo "Select Intel CPU generation:"
-  echo "  1  Sandy Bridge (2nd)"
-  echo "  2  Ivy Bridge (3rd)"
-  echo "  3  Haswell/Broadwell (4th/5th)"
-  echo "  4  Skylake -> Comet Lake (6th-10th)"
-  echo "  5  Coffee/Comet (8th-10th)"
-  echo "  6  Gemini Lake"
-  echo "  7  Ice Lake mobile (10th)"
-  echo "  8  Rocket/Tiger/Alder/Raptor (11th-14th)  <- i9-12900H Intel Iris Xe"
-  echo "  9  Meteor/Lunar Lake (xe driver path)"
-  ask "Selection [8]: "; read -r GPU_GEN
-  GPU_GEN="$(default_if_empty "$GPU_GEN" "8")"
+  echo "  1   Sandy Bridge     (2nd)          Core i3/5/7 2xxx"
+  echo "  2   Ivy Bridge       (3rd)          Core i3/5/7 3xxx"
+  echo "  3   Haswell/BDW      (4th/5th)      Core i3/5/7 4xxx-5xxx"
+  echo "  4   Skylake->CML     (6-10th)       Core i3/5/7/9 6xxx-10xxx"
+  echo "  5   Coffee/Comet     (8-10th)       Core i3/5/7/9 8xxx-10xxx"
+  echo "  6   Gemini Lake                     Pentium/Celeron J/N 4xxx/5xxx"
+  echo "  7   Ice Lake mobile  (10th)         Core i3/5/7 10xxG1/G4/G7"
+  echo "  8   Rocket/Tiger/Alder/Raptor       Core i3/5/7/9 11xxx-14xxx (desktop/mainstream)"
+  echo "  9   Alder/Raptor Lake H/P/U mobile  Core i3/5/7/9 12xxx-14xxx H/P/U  <- i9-12900H (Intel Iris Xe)"
+  echo " 10   Jasper Lake                     Pentium/Celeron N 4xxx/5xxx/6xxx"
+  echo " 11   Alder Lake-N / Twin Lake        N-series"
+  echo " 12   Arrow/Meteor Lake               Core Ultra (xe driver)"
+  echo " 13   Lunar Lake                      Core Ultra 2xx (xe driver)"
+  ask "Selection [9]: "; read -r GPU_GEN
+  GPU_GEN="$(default_if_empty "$GPU_GEN" "9")"
 
   ask "Enable GPU passthrough SR-IOV? [Y/n]: "; read -r GPU_PASS_CHOICE
   if [[ "${GPU_PASS_CHOICE:-Y}" =~ ^[Nn]$ ]]; then
@@ -200,18 +204,31 @@ prompt_gpu() {
   ask "How many VFs? [7]: "; read -r GPU_VF_COUNT
   GPU_VF_COUNT="$(default_if_empty "$GPU_VF_COUNT" "7")"
 
+  # Set ROM file, driver, kernel args, and whether x-igd-lpc is needed
+  # x-igd-lpc required for Ice Lake, Rocket Lake, Tiger Lake, Alder Lake and newer
   case "$GPU_GEN" in
-    9)
-      GPU_DRIVER="xe"
-      GPU_ROM="N/A"
-      KERNEL_GPU_ARGS="xe.max_vfs=${GPU_VF_COUNT} module_blacklist=i915"
-      ;;
-    *)
-      GPU_DRIVER="i915"
-      GPU_ROM="RKL_TGL_ADL_RPL_GOPv17_igd.rom"
-      KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe"
-      ;;
+    1)  GPU_DRIVER="i915"; GPU_ROM_FILE="SNB_GOPv2_igd.rom";            GPU_IGD_LPC="no"  ;;
+    2)  GPU_DRIVER="i915"; GPU_ROM_FILE="IVB_GOPv3_igd.rom";            GPU_IGD_LPC="no"  ;;
+    3)  GPU_DRIVER="i915"; GPU_ROM_FILE="HSW_BDW_GOPv5_igd.rom";        GPU_IGD_LPC="no"  ;;
+    4)  GPU_DRIVER="i915"; GPU_ROM_FILE="SKL_CML_GOPv9_igd.rom";        GPU_IGD_LPC="no"  ;;
+    5)  GPU_DRIVER="i915"; GPU_ROM_FILE="CFL_CML_GOPv9.1_igd.rom";      GPU_IGD_LPC="no"  ;;
+    6)  GPU_DRIVER="i915"; GPU_ROM_FILE="GLK_GOPv13_igd.rom";           GPU_IGD_LPC="no"  ;;
+    7)  GPU_DRIVER="i915"; GPU_ROM_FILE="ICL_GOPv14_igd.rom";           GPU_IGD_LPC="yes" ;;
+    8)  GPU_DRIVER="i915"; GPU_ROM_FILE="RKL_TGL_ADL_RPL_GOPv17_igd.rom"; GPU_IGD_LPC="yes" ;;
+    9)  GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-H_RPL-H_GOPv21_igd.rom";  GPU_IGD_LPC="yes" ;;
+    10) GPU_DRIVER="i915"; GPU_ROM_FILE="JSL_GOPv18_igd.rom";           GPU_IGD_LPC="no"  ;;
+    11) GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-N_TWL_GOPv21_igd.rom";    GPU_IGD_LPC="yes" ;;
+    12) GPU_DRIVER="xe";   GPU_ROM_FILE="ARL_MTL_GOPv22_igd.rom";       GPU_IGD_LPC="yes" ;;
+    13) GPU_DRIVER="xe";   GPU_ROM_FILE="LNL_GOPv2X_igd.rom";           GPU_IGD_LPC="yes" ;;
+    *)  GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-H_RPL-H_GOPv21_igd.rom";  GPU_IGD_LPC="yes" ;;
   esac
+  GPU_ROM_URL="https://github.com/LongQT-sea/intel-igpu-passthru/releases/download/v0.1/${GPU_ROM_FILE}"
+
+  if [ "$GPU_DRIVER" = "xe" ]; then
+    KERNEL_GPU_ARGS="xe.max_vfs=${GPU_VF_COUNT} module_blacklist=i915"
+  else
+    KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe"
+  fi
 
   GPU_PCI_ID_DETECTED="$(lspci -Dnn | awk '/VGA compatible controller|Display controller/ && /Intel/{print $1; exit}')"
   GPU_PCI_ID_DETECTED="$(default_if_empty "$GPU_PCI_ID_DETECTED" "0000:00:02.0")"
@@ -222,6 +239,39 @@ prompt_gpu() {
   else
     GPU_PCI_ID="$GPU_PCI_ID_DETECTED"
   fi
+}
+
+prompt_rom() {
+  [ "${GPU_PASSTHROUGH:-yes}" = "yes" ] || return 0
+  section "Step 4b: Intel iGPU ROM File (OpROM/VBIOS)"
+  GPU_ROM_DEST="/usr/share/kvm/igd.rom"
+  info "ROM for your generation: ${GPU_ROM_FILE}"
+  info "  Source: ${GPU_ROM_URL}"
+  echo ""
+  echo "  1) Download now (auto curl from LongQT-sea/intel-igpu-passthru)"
+  echo "  2) I already have the ROM file — specify path"
+  ask "Choice [1/2]: "; read -r ROM_CHOICE
+
+  case "${ROM_CHOICE:-1}" in
+    2)
+      ask "Path to ROM file: "; read -r USER_ROM_PATH
+      if [ ! -f "$USER_ROM_PATH" ]; then
+        warn "ROM file not found: $USER_ROM_PATH"; exit 1
+      fi
+      sudo mkdir -p /usr/share/kvm
+      sudo cp "$USER_ROM_PATH" "$GPU_ROM_DEST"
+      ;;
+    *)
+      if [ ! -f "$GPU_ROM_DEST" ]; then
+        info "Downloading ${GPU_ROM_FILE} to ${GPU_ROM_DEST}..."
+        sudo mkdir -p /usr/share/kvm
+        sudo curl -fL "$GPU_ROM_URL" -o "$GPU_ROM_DEST"
+      else
+        ok "ROM already present: $GPU_ROM_DEST"
+      fi
+      ;;
+  esac
+  ok "ROM ready at ${GPU_ROM_DEST}"
 }
 
 prompt_tunnel() {
@@ -280,7 +330,10 @@ GPU_GEN="${GPU_GEN}"
 GPU_PCI_ID="${GPU_PCI_ID}"
 GPU_VF_COUNT="${GPU_VF_COUNT}"
 GPU_DRIVER="${GPU_DRIVER}"
-GPU_ROM="${GPU_ROM}"
+GPU_ROM_FILE="${GPU_ROM_FILE}"
+GPU_ROM_URL="${GPU_ROM_URL}"
+GPU_ROM_PATH="${GPU_ROM_DEST:-/usr/share/kvm/igd.rom}"
+GPU_IGD_LPC="${GPU_IGD_LPC}"
 
 HOST_TUNNEL_DOMAIN="${HOST_TUNNEL_DOMAIN}"
 HOST_TUNNEL_HOST="${HOST_TUNNEL_HOST}"
@@ -380,21 +433,27 @@ create_vm() {
   if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     ok "VM '${VM_NAME}' already exists. Skipping virt-install."
   else
+    # Machine type must be pc (i440fx) for legacy IGD passthrough — NOT q35
+    # OVMF/UEFI required per LongQT-sea/intel-igpu-passthru guide
     sudo virt-install \
       --name "$VM_NAME" \
       --memory "$VM_RAM_MB" \
       --vcpus "$VM_VCPUS" \
       --cpu host-passthrough \
+      --machine pc \
+      --boot uefi \
       --disk "path=${VM_DISK_PATH},size=${VM_DISK_GB},format=qcow2,bus=virtio" \
       --os-variant "$VM_OS_VARIANT" \
       --network network=default,model=virtio \
       --graphics none \
+      --video none \
       --console pty,target_type=serial \
       --cdrom "$VM_ISO_PATH" \
       --noautoconsole
-    ok "VM created. Complete Ubuntu installer if prompted via console."
+    ok "VM created. Complete Ubuntu installer via: sudo virsh console ${VM_NAME}"
   fi
 
+  # virtiofs shared storage
   TMP_VIRTIOFS_XML="/tmp/${VM_NAME}-virtiofs.xml"
   cat > "$TMP_VIRTIOFS_XML" <<EOF
 <filesystem type='mount' accessmode='passthrough'>
@@ -405,17 +464,57 @@ create_vm() {
 EOF
   sudo virsh attach-device "$VM_NAME" "$TMP_VIRTIOFS_XML" --config >/dev/null 2>&1 || true
 
-  if [ "$GPU_PASSTHROUGH" = "yes" ]; then
-    VF_PCI="${GPU_PCI_ID%.*}.1"
+  # GPU SR-IOV VF passthrough with ROM + x-igd-lpc (per LongQT-sea/intel-igpu-passthru)
+  if [ "${GPU_PASSTHROUGH:-no}" = "yes" ] && [ -f "${GPU_ROM_PATH:-/usr/share/kvm/igd.rom}" ]; then
+    # NEVER pass the PF (00:02.0) — only VF (00:02.1)
+    # Parse VF PCI address from PF: 0000:00:02.0 → 0000:00:02.1
+    PF_DOMAIN="${GPU_PCI_ID%%:*}"
+    PF_BUS="${GPU_PCI_ID#*:}"; PF_BUS="${PF_BUS%%:*}"
+    PF_SLOT_FN="${GPU_PCI_ID##*:}"; PF_SLOT="${PF_SLOT_FN%%.*}"
+    VF_FUNCTION="1"
+
     TMP_VF_XML="/tmp/${VM_NAME}-vf.xml"
     cat > "$TMP_VF_XML" <<EOF
 <hostdev mode='subsystem' type='pci' managed='yes'>
   <source>
-    <address domain='0x${VF_PCI:0:4}' bus='0x${VF_PCI:5:2}' slot='0x${VF_PCI:8:2}' function='0x${VF_PCI:11:1}'/>
+    <address domain='0x${PF_DOMAIN}' bus='0x${PF_BUS}' slot='0x${PF_SLOT}' function='0x${VF_FUNCTION}'/>
   </source>
+  <rom file='${GPU_ROM_PATH}'/>
 </hostdev>
 EOF
-    sudo virsh attach-device "$VM_NAME" "$TMP_VF_XML" --config >/dev/null 2>&1 || warn "Could not attach VF ${VF_PCI} yet."
+    sudo virsh attach-device "$VM_NAME" "$TMP_VF_XML" --config >/dev/null 2>&1 \
+      || warn "Could not attach VF yet — reboot host first if SR-IOV VFs are not visible."
+
+    # x-igd-lpc required for Ice Lake / Rocket Lake / Tiger Lake / Alder Lake and newer
+    if [ "${GPU_IGD_LPC:-no}" = "yes" ]; then
+      TMP_QEMU_XML="/tmp/${VM_NAME}-qemu-args.xml"
+      cat > "$TMP_QEMU_XML" <<EOF
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+  <qemu:commandline>
+    <qemu:arg value='-set'/>
+    <qemu:arg value='device.hostpci0.x-igd-lpc=on'/>
+  </qemu:commandline>
+</domain>
+EOF
+      # Merge qemu:commandline into existing VM XML
+      EXISTING_XML="$(sudo virsh dumpxml "$VM_NAME")"
+      if echo "$EXISTING_XML" | grep -q "qemu:commandline"; then
+        ok "qemu:commandline already present in VM XML."
+      else
+        # virt-xml can append qemu args; fallback: instruct user
+        if command -v virt-xml >/dev/null 2>&1; then
+          sudo virt-xml "$VM_NAME" --edit --qemu-commandline='-set device.hostpci0.x-igd-lpc=on' 2>/dev/null \
+            || warn "Could not auto-add x-igd-lpc arg. Add manually: virsh edit ${VM_NAME}"
+        else
+          warn "Add x-igd-lpc manually to VM XML (required for Alder Lake+):"
+          warn "  sudo virsh edit ${VM_NAME}"
+          warn "  Add inside <domain>:"
+          warn "    <qemu:commandline><qemu:arg value='-set'/><qemu:arg value='device.hostpci0.x-igd-lpc=on'/></qemu:commandline>"
+        fi
+      fi
+    fi
+  elif [ "${GPU_PASSTHROUGH:-no}" = "yes" ]; then
+    warn "ROM file not found at ${GPU_ROM_PATH:-/usr/share/kvm/igd.rom} — skipping GPU passthrough."
   fi
 
   sudo virsh autostart "$VM_NAME"
@@ -463,6 +562,7 @@ main() {
   prompt_iso
   prompt_network_and_share
   prompt_gpu
+  prompt_rom
   prompt_tunnel
   write_vm_conf
   install_sriov_host
