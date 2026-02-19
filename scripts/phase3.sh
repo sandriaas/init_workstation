@@ -474,44 +474,40 @@ REMOTE
 }
 
 # =============================================================================
-# Test cloudflared websocat SSH tunnel from host → VM
+# Test cloudflared SSH tunnel from host → VM
+# Uses 'cloudflared access ssh' (already installed by phase1) — correct for token tunnels
 # =============================================================================
 CF_TUNNEL_RESULT="not tested"
 test_cf_tunnel() {
   [ -n "${VM_TUNNEL_HOST:-}" ] || { CF_TUNNEL_RESULT="no VM_TUNNEL_HOST configured"; return; }
-  info "Testing cloudflared WebSocket SSH tunnel → ${VM_TUNNEL_HOST}..."
+  info "Testing cloudflared SSH tunnel → ${VM_TUNNEL_HOST}..."
 
-  # Ensure websocat available on host
-  if ! command -v websocat &>/dev/null; then
-    warn "websocat not found on host — installing..."
-    curl -sL https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl \
-      -o /usr/local/bin/websocat && chmod +x /usr/local/bin/websocat 2>/dev/null || true
+  # cloudflared is installed on host by phase1 — use 'access ssh' ProxyCommand
+  if ! command -v cloudflared &>/dev/null; then
+    CF_TUNNEL_RESULT="cloudflared not on host PATH (run phase1 first)"
+    warn "$CF_TUNNEL_RESULT"; return
   fi
 
-  if ! command -v websocat &>/dev/null; then
-    CF_TUNNEL_RESULT="websocat not available — install manually"
-    return
-  fi
-
-  # Give cloudflared ~30s to come up after install
   local attempts=0
   while [ $attempts -lt 6 ]; do
     if ssh \
          -o StrictHostKeyChecking=accept-new \
-         -o ConnectTimeout=8 \
+         -o ConnectTimeout=10 \
          -o BatchMode=yes \
-         -o ProxyCommand="websocat -E --binary - wss://%h" \
+         -o "ProxyCommand=cloudflared access ssh --hostname %h" \
          "${VM_SSH_USER}@${VM_TUNNEL_HOST}" true 2>/dev/null; then
       CF_TUNNEL_RESULT="✓  working"
-      ok "Cloudflared SSH tunnel test passed: ssh ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
+      ok "Cloudflared SSH tunnel working: ssh ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
       return
     fi
     (( attempts++ )) || true
-    sleep 5
+    [ $attempts -lt 6 ] && sleep 10
   done
-  CF_TUNNEL_RESULT="not reachable yet (tunnel may need a minute to propagate DNS)"
-  warn "Cloudflared SSH tunnel not reachable yet — try again in 1-2 min:"
-  warn "  ssh -o ProxyCommand='websocat -E --binary - wss://%h' ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
+
+  CF_TUNNEL_RESULT="not reachable yet — tunnel may need 1-2 min after first install"
+  warn "Cloudflared SSH tunnel not reachable yet."
+  warn "  Retry: ssh -o ProxyCommand='cloudflared access ssh --hostname %h' ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
+  warn "  Also check tunnel status in VM: ssh ${VM_SSH_USER}@${VM_STATIC_IP%/*} 'systemctl status cloudflared'"
 }
 update_vm_conf() {
   [ -f "$VM_CONF" ] || return
@@ -574,11 +570,10 @@ print_summary() {
   virsh list --all 2>/dev/null | sed 's/^/  /' || true
   echo ""
   echo -e "${BOLD}  ── SSH Access ───────────────────────────────────────────────${RESET}"
-  printf "  %-24s %s\n" "Direct (LAN):"        "ssh ${VM_SSH_USER}@${vm_ip}"
-  printf "  %-24s %s\n" "Via host tunnel:"      "ssh ${VM_SSH_USER}@${HOST_TUNNEL_HOST}"
-  printf "  %-24s %s\n" "VM tunnel status:"     "${CF_TUNNEL_RESULT:-not tested}"
-  printf "  %-24s %s\n" "Via VM tunnel:"        "ssh ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
-  printf "  %-24s %s\n" "Via VM tunnel (raw):"  "ssh -o ProxyCommand='websocat -E --binary - wss://%h' ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
+  printf "  %-24s %s\n" "Direct (LAN):"       "ssh ${VM_SSH_USER}@${vm_ip}"
+  printf "  %-24s %s\n" "Via host tunnel:"     "ssh ${VM_SSH_USER}@${HOST_TUNNEL_HOST}"
+  printf "  %-24s %s\n" "VM tunnel status:"    "${CF_TUNNEL_RESULT:-not tested}"
+  printf "  %-24s %s\n" "Via VM tunnel:"       "ssh -o ProxyCommand='cloudflared access ssh --hostname %h' ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
   echo ""
   echo -e "${BOLD}  ── Files ───────────────────────────────────────────────────${RESET}"
   printf "  %-18s %s\n" "VM conf:" "$VM_CONF"
