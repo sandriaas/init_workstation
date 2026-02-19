@@ -941,8 +941,10 @@ create_vm() {
       while ss -tlnp 2>/dev/null | grep -q ":${http_port} "; do
         (( http_port++ )) || true
       done
+      # Open firewall port on virbr0 — INPUT policy is DROP by default on CachyOS
+      sudo iptables -I INPUT -i virbr0 -p tcp --dport "$http_port" -j ACCEPT 2>/dev/null || true
       python3 -m http.server "$http_port" --directory "$seed_dir" \
-        --bind 192.168.122.1 >/dev/null 2>&1 &
+        --bind 192.168.122.1 2>&1 | grep -v "^$" &
       http_pid=$!
       info "Serving cloud-init data at http://192.168.122.1:${http_port}/ (pid ${http_pid})"
       info "Ubuntu autoinstall enabled — installation will run unattended (~10-15 min)"
@@ -982,11 +984,13 @@ create_vm() {
       return 1
     fi
 
-    # HTTP server only needed until installer fetches data (first ~30s), kill after VM starts
+    # Keep HTTP server up for 5 min — UEFI boot + initramfs takes ~2-3 min before cloud-init runs
     if [ -n "$http_pid" ]; then
-      sleep 30
+      info "Waiting for cloud-init to fetch autoinstall data (up to 5 min)..."
+      sleep 300
       kill "$http_pid" 2>/dev/null || true
-      info "cloud-init HTTP server stopped."
+      sudo iptables -D INPUT -i virbr0 -p tcp --dport "$http_port" -j ACCEPT 2>/dev/null || true
+      info "cloud-init HTTP server stopped, firewall rule removed."
     fi
 
     if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
