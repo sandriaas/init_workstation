@@ -850,9 +850,6 @@ EOF
     - net-tools
   late-commands:
     - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /target/etc/ssh/sshd_config
-    - sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8"/' /target/etc/default/grub
-    - curtin in-target --target=/target -- update-grub
-    - curtin in-target --target=/target -- systemctl enable serial-getty@ttyS0.service
   user-data:
     disable_root: false
 EOF
