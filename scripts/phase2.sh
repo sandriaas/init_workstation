@@ -905,22 +905,23 @@ create_vm() {
   _ensure_libvirt_readable() {
     local src="$1"
     [ -f "$src" ] || return 0
-    # Check if it's already under a libvirt-accessible path
+    # Already under a libvirt-accessible path — return as-is
     if echo "$src" | grep -qE "^/var/lib/libvirt|^/tmp|^/root"; then
-      return 0
+      echo "$src"; return 0
     fi
     local dest="/var/lib/libvirt/images/$(basename "$src")"
     if [ ! -f "$dest" ]; then
-      info "Copying $(basename "$src") → ${dest}  (libvirt-qemu needs access)"
+      # Print to stderr so it doesn't pollute the $() capture
+      info "Copying $(basename "$src") → ${dest}  (libvirt-qemu needs access)" >&2
       sudo cp "$src" "$dest"
       sudo chmod 644 "$dest"
     fi
     echo "$dest"
   }
 
-  local iso_path="$VM_ISO_PATH"
-  local new_path; new_path="$(_ensure_libvirt_readable "$iso_path")"
-  [ -n "${new_path:-}" ] && [ "$new_path" != "$iso_path" ] && iso_path="$new_path"
+  local iso_path
+  iso_path="$(_ensure_libvirt_readable "$VM_ISO_PATH")"
+  [ -z "$iso_path" ] && iso_path="$VM_ISO_PATH"
 
   if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     ok "VM '${VM_NAME}' already exists. Skipping virt-install."
@@ -932,9 +933,9 @@ create_vm() {
       create_seed_iso
       source_vm_conf  # reload to pick up VM_SEED_ISO
       # Ensure seed ISO accessible too
-      local seed_path="$VM_SEED_ISO"
-      local new_seed; new_seed="$(_ensure_libvirt_readable "$seed_path")"
-      [ -n "${new_seed:-}" ] && [ "$new_seed" != "$seed_path" ] && seed_path="$new_seed"
+      local seed_path
+      seed_path="$(_ensure_libvirt_readable "$VM_SEED_ISO")"
+      [ -z "$seed_path" ] && seed_path="$VM_SEED_ISO"
       seed_disk_arg="--disk path=${seed_path},device=cdrom,readonly=on,format=raw"
       extra_args="autoinstall ds=nocloud;s=/cidata/ console=ttyS0,115200n8 quiet ---"
       info "Ubuntu autoinstall enabled — installation will run unattended (~10-15 min)"
