@@ -198,6 +198,14 @@ It detects the OS, installs websocat + openssh, and writes `~/.ssh/config`.
 bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)
 ```
 
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.ps1 | iex
+```
+
+> Installs Scoop, winget, websocat, and OpenSSH client automatically.
+
 ### Android (Termux from [F-Droid](https://f-droid.org/packages/com.termux/))
 
 ```bash
@@ -214,8 +222,6 @@ Host minipc
 ```
 
 Then: `ssh minipc`
-
-> **Windows:** use full path in ProxyCommand: `C:\Users\<you>\bin\websocat.exe`
 
 ---
 
