@@ -183,8 +183,36 @@ ensure_vm_running() {
   section "Step 1 — Start VM"
 
   if ! virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-    err "VM '${VM_NAME}' not yet defined. Run scripts/phase2.sh first."
-    exit 1
+    warn "VM '${VM_NAME}' is not yet created in libvirt."
+    echo ""
+    echo -e "  ${BOLD}Phase 2${RESET} must run first to create and install the VM."
+    echo -e "  The existing conf (${CYAN}$(basename "$VM_CONF")${RESET}) will be reused automatically."
+    echo ""
+    echo "  1) Run phase2 now  (recommended)"
+    echo "  2) Exit — I'll run phase2 manually"
+    ask "Choice [1/2, default=1]: "; read -r _p2choice
+    if [ "${_p2choice:-1}" != "2" ]; then
+      info "Launching phase2 with conf: $(basename "$VM_CONF")..."
+      # Write LAST_VM_CONF to state so phase2 pre-selects this conf
+      local _state="${VM_CONF_DIR}/.state"
+      mkdir -p "$VM_CONF_DIR"
+      if [ -f "$_state" ]; then
+        sed -i "s|^LAST_VM_CONF=.*|LAST_VM_CONF=\"${VM_CONF}\"|" "$_state"
+        sed -i "s|^LAST_VM_NAME=.*|LAST_VM_NAME=\"${VM_NAME}\"|" "$_state"
+      else
+        printf 'LAST_VM_CONF="%s"\nLAST_VM_NAME="%s"\n' "$VM_CONF" "$VM_NAME" > "$_state"
+      fi
+      local _phase2="${BASH_SOURCE[0]%/*}/phase2.sh"
+      if [ ! -f "$_phase2" ]; then
+        err "phase2.sh not found at ${_phase2}"
+        exit 1
+      fi
+      exec sudo bash "$_phase2"
+    else
+      err "VM '${VM_NAME}' not yet defined."
+      echo "  Run:  sudo bash scripts/phase2.sh"
+      exit 1
+    fi
   fi
 
   local state; state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
