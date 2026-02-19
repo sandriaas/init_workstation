@@ -326,7 +326,15 @@ run_remote_setup() {
   info "Steps: packages → SSH config → static IP → shared folder → i915-sriov-dkms → cloudflared tunnel"
   echo ""
 
-  ssh -tt -o StrictHostKeyChecking=accept-new "${VM_SSH_USER}@${VM_SSH_HOST}" \
+  # Ensure VM has internet via libvirt NAT (UFW may block FORWARD)
+  sudo ufw route allow in on virbr0 out on virbr0 >/dev/null 2>&1 || true
+  sudo ufw route allow in on virbr0 >/dev/null 2>&1 || true
+  sudo ufw route allow out on virbr0 >/dev/null 2>&1 || true
+  # Also ensure iptables masquerade for libvirt NAT (in case it got flushed)
+  sudo iptables -t nat -C POSTROUTING -s 192.168.122.0/24 ! -d 192.168.122.0/24 -j MASQUERADE 2>/dev/null \
+    || sudo iptables -t nat -A POSTROUTING -s 192.168.122.0/24 ! -d 192.168.122.0/24 -j MASQUERADE 2>/dev/null || true
+
+  ssh -T -o StrictHostKeyChecking=accept-new "${VM_SSH_USER}@${VM_SSH_HOST}" \
     "VM_NAME='${VM_NAME}' \
      VM_AUTOINSTALL='${VM_AUTOINSTALL:-yes}' \
      VM_TUNNEL_HOST='${VM_TUNNEL_HOST}' \
