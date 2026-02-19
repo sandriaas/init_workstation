@@ -959,8 +959,7 @@ create_vm() {
       --console "${VM_CONSOLE:-pty,target_type=serial}" \
       --location "${iso_path},kernel=casper/vmlinuz,initrd=casper/initrd" \
       ${seed_disk_arg} \
-      ${extra_args:+--extra-args "$extra_args"} \
-      --noautoconsole; then
+      ${extra_args:+--extra-args "$extra_args"}; then
       err "virt-install failed! Check the error above."
       err "Common fixes: missing OVMF firmware, invalid ISO path, or libvirtd not running."
       err "  ISO path:   ${iso_path}"
@@ -973,9 +972,8 @@ create_vm() {
     fi
 
     if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-      ok "VM created with autoinstall. Ubuntu is installing unattended."
-      info "Monitor progress:  sudo virsh console ${VM_NAME}  (exit: Ctrl+])"
-      info "Phase 3 will wait for SSH automatically once installation completes."
+      info "Ubuntu autoinstall complete. VM rebooted — continuing setup."
+      info "Phase 3 will verify SSH connectivity."
     else
       ok "VM created. Complete Ubuntu installer via: sudo virsh console ${VM_NAME}"
     fi
@@ -1059,7 +1057,7 @@ test_vm_ssh() {
 
   info "Polling SSH at ${VM_USER}@${vm_ip} (up to $(( max * 5 / 60 )) min)..."
   if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-    info "Optional — watch progress: sudo virsh console ${VM_NAME}  (exit: Ctrl+])"
+    info "VM rebooted after install — waiting for SSH to come up..."
   fi
 
   local attempts=0
