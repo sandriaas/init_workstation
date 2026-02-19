@@ -472,7 +472,8 @@ step_sriov_host() {
     grep -q "i915.max_vfs=" /etc/default/grub 2>/dev/null; } && SRIOV_ARGS_SET=true
   { pacman -Q i915-sriov-dkms >/dev/null 2>&1 || \
     dpkg -s i915-sriov-dkms >/dev/null 2>&1 || \
-    rpm -q akmod-i915-sriov >/dev/null 2>&1; } && SRIOV_DKMS_SET=true
+    rpm -q akmod-i915-sriov >/dev/null 2>&1 || \
+    dkms status 2>/dev/null | grep -q "i915.sriov\|i915-sriov"; } && SRIOV_DKMS_SET=true
 
   if $SRIOV_ARGS_SET && $SRIOV_DKMS_SET; then
     ok "SR-IOV kernel args + i915-sriov-dkms already in place. Skipping."
