@@ -287,8 +287,12 @@ prompt_iso() {
 
   _ensure_iso() {
     local dest="$1"
-    # Download if missing, then verify; re-download once if checksum fails
-    [ -f "$dest" ] || _download_iso "$dest"
+    if [ -f "$dest" ]; then
+      info "Found existing ISO: $dest"
+    else
+      _download_iso "$dest"
+    fi
+    # Always verify checksum — catches incomplete/corrupt downloads
     if ! _verify_iso "$dest"; then
       _download_iso "$dest"
       _verify_iso "$dest" || { warn "ISO still invalid after re-download. Check your connection."; exit 1; }
@@ -317,12 +321,24 @@ prompt_iso() {
 
 prompt_network_and_share() {
   section "Step 4: Network + Shared Folder"
-  VM_STATIC_IP_DEFAULT="192.168.122.50/24"
-  VM_GATEWAY_DEFAULT="192.168.122.1"
+
+  # Auto-detect libvirt default network gateway/subnet
+  _VIRT_GW="$(sudo virsh net-dumpxml default 2>/dev/null \
+    | grep -oP "ip address='\K[^']+" | head -1 || true)"
+  if [ -n "${_VIRT_GW:-}" ]; then
+    # Suggest .50 in the same subnet as the gateway (e.g. 192.168.122.1 → 192.168.122.50)
+    _VIRT_PREFIX="${_VIRT_GW%.*}"
+    VM_STATIC_IP_DEFAULT="${_VIRT_PREFIX}.50/24"
+    VM_GATEWAY_DEFAULT="${_VIRT_GW}"
+  else
+    VM_STATIC_IP_DEFAULT="192.168.122.50/24"
+    VM_GATEWAY_DEFAULT="192.168.122.1"
+  fi
   VM_DNS_DEFAULT="1.1.1.1,8.8.8.8"
   SHARED_DIR_DEFAULT="${USER_HOME}/server-data"
   SHARED_TAG_DEFAULT="hostshare"
 
+  info "Host LAN IP: $(hostname -I 2>/dev/null | awk '{print $1}') — VM will be on libvirt NAT (${VM_GATEWAY_DEFAULT%.*}.x)"
   ask "VM static IP/CIDR [${VM_STATIC_IP_DEFAULT}]: "; read -r VM_STATIC_IP
   ask "VM gateway [${VM_GATEWAY_DEFAULT}]: "; read -r VM_GATEWAY
   ask "VM DNS (comma-separated) [${VM_DNS_DEFAULT}]: "; read -r VM_DNS
