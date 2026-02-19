@@ -508,12 +508,22 @@ _check_sriov_kernel_boot() {
     else
       sudo sed -i "s|^DEFAULT_ENTRY=.*|DEFAULT_ENTRY=\"${LIMINE_ENTRY}\"|" /etc/default/limine
     fi
-    # Disable remember_last_entry so default_entry takes effect
+    sudo limine-update
+    # limine-update regenerates /boot/limine.conf — patch AFTER it runs:
+    # 1. Disable remember_last_entry (it overrides default_entry when set to yes)
+    # 2. Find and set correct default_entry number by counting all entry lines
+    #    (lines starting with optional spaces + /) including group headers (/+).
+    #    Example: /+CachyOS=1, //linux-cachyos=2, //linux-cachyos-lts=3
     if [ -f /boot/limine.conf ]; then
       sudo sed -i 's/^remember_last_entry: yes/remember_last_entry: no/' /boot/limine.conf
+      LIMINE_ENTRY_NUM="$(sudo awk '/^\s*\//{n++} /^  \/\/linux[^\/]*lts/{print n; exit}' /boot/limine.conf || true)"
+      if [ -n "${LIMINE_ENTRY_NUM:-}" ]; then
+        sudo sed -i "s/^default_entry: .*/default_entry: ${LIMINE_ENTRY_NUM}/" /boot/limine.conf
+        ok "Limine default boot → entry ${LIMINE_ENTRY_NUM} = ${COMPAT_KERNEL}"
+      else
+        warn "Could not find LTS entry in /boot/limine.conf — set default_entry manually"
+      fi
     fi
-    sudo limine-update
-    ok "Limine default boot → ${LIMINE_ENTRY} (${COMPAT_KERNEL})"
   elif [ -f /etc/default/grub ]; then
     sudo sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"${COMPAT_KERNEL}\"|" /etc/default/grub
     case "$OS" in
