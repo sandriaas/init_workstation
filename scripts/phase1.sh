@@ -510,8 +510,20 @@ EOF
 # FINAL SUMMARY — how to connect from phone + every OS
 # =============================================================================
 print_final_summary() {
+  # Try temp file first (written by step_cloudflare_tunnel if it ran this session)
   TUNNEL_HOST_SAVED=""
   [ -f /tmp/phase1_tunnel_host ] && TUNNEL_HOST_SAVED=$(cat /tmp/phase1_tunnel_host)
+
+  # Fallback: parse from existing cloudflared config.yml
+  if [ -z "$TUNNEL_HOST_SAVED" ]; then
+    for cfg in "$USER_HOME/.cloudflared/config.yml" /etc/cloudflared/config.yml; do
+      if [ -f "$cfg" ]; then
+        TUNNEL_HOST_SAVED="$(awk '/hostname:/{print $2; exit}' "$cfg" 2>/dev/null || true)"
+        [ -n "$TUNNEL_HOST_SAVED" ] && break
+      fi
+    done
+  fi
+
   TUNNEL_HOST_SAVED="${TUNNEL_HOST_SAVED:-YOUR_TUNNEL_HOST}"
   TUN_USER="${CURRENT_USER}"
 
