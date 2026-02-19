@@ -924,6 +924,15 @@ generate_cloud_config() {
     pw_hash="$(openssl passwd -6 'changeme123' 2>/dev/null || echo 'changeme123')"
   fi
 
+  # Ensure SSH key exists for BatchMode SSH polling to work
+  local ssh_key_file="${HOME}/.ssh/id_ed25519"
+  if [ ! -f "${ssh_key_file}.pub" ]; then
+    info "Generating SSH key for VM access..."
+    ssh-keygen -t ed25519 -f "$ssh_key_file" -N "" -C "${CURRENT_USER}@host" >/dev/null 2>&1
+    ok "SSH key generated: ${ssh_key_file}.pub"
+  fi
+  local ssh_pubkey; ssh_pubkey="$(cat "${ssh_key_file}.pub" 2>/dev/null || true)"
+
   {
     printf '#cloud-config\n'
     printf 'hostname: %s\n' "${VM_HOSTNAME}"
@@ -934,6 +943,10 @@ generate_cloud_config() {
     printf '    sudo: ALL=(ALL) NOPASSWD:ALL\n'
     printf '    shell: /bin/bash\n'
     printf '    groups: [adm, sudo]\n'
+    if [ -n "$ssh_pubkey" ]; then
+      printf '    ssh_authorized_keys:\n'
+      printf '      - %s\n' "${ssh_pubkey}"
+    fi
     printf 'ssh_pwauth: true\n'
     printf 'chpasswd:\n'
     printf '  expire: false\n'
@@ -943,6 +956,23 @@ generate_cloud_config() {
     printf "  - sed -i 's/^#\\\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config\n"
     printf '  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true\n'
   } > "${seed_dir}/user-data"
+
+  # network-config: set static IP via netplan (read by cloud-init from seed ISO)
+  local vm_ip="${VM_STATIC_IP%/*}"
+  local vm_prefix="${VM_STATIC_IP#*/}"
+  {
+    printf 'version: 2\n'
+    printf 'ethernets:\n'
+    printf '  id0:\n'
+    printf '    match: {}\n'
+    printf '    dhcp4: false\n'
+    printf '    addresses: [%s/%s]\n' "${vm_ip}" "${vm_prefix}"
+    printf '    routes:\n'
+    printf '      - to: default\n'
+    printf '        via: %s\n' "${VM_GATEWAY}"
+    printf '    nameservers:\n'
+    printf '      addresses: [%s]\n' "$(echo "${VM_DNS}" | tr ',' ', ')"
+  } > "${seed_dir}/network-config"
 
   : > "${seed_dir}/meta-data"
   ok "Cloud-config user-data written to ${seed_dir}/user-data"
@@ -1050,6 +1080,17 @@ create_vm() {
       return 1
     fi
     ok "VM imported. cloud-init configuring on first boot (~1-2 min then auto-reboot)."
+
+    # Reserve static IP in libvirt DHCP for this VM's MAC (fallback if network-config doesn't apply)
+    local vm_mac; vm_mac="$(sudo virsh domiflist "$VM_NAME" 2>/dev/null | awk '/network/{print $5}' | head -1 || true)"
+    if [ -n "$vm_mac" ] && [ -n "${VM_STATIC_IP:-}" ]; then
+      local vm_ip="${VM_STATIC_IP%/*}"
+      sudo virsh net-update default add ip-dhcp-host \
+        "<host mac='${vm_mac}' ip='${vm_ip}'/>" \
+        --live --config >/dev/null 2>&1 \
+        && ok "DHCP reservation: ${vm_mac} → ${vm_ip}" \
+        || true  # non-fatal — network-config in seed ISO handles it
+    fi
   fi
 
   # ── virtiofs shared storage ────────────────────────────────────────────────
