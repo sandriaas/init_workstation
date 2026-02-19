@@ -471,27 +471,61 @@ prompt_rom() {
   info "ROM for your generation: ${GPU_ROM_FILE}"
   info "  Source: ${GPU_ROM_URL}"
   echo ""
-  echo "  1) Download now (auto curl from LongQT-sea/intel-igpu-passthru)"
+  echo "  1) Download now (from LongQT-sea/intel-igpu-passthru)"
   echo "  2) I already have the ROM file — specify path"
   ask "Choice [1/2]: "; read -r ROM_CHOICE
+
+  _verify_rom() {
+    local dest="$1"
+    [ -f "$dest" ] || { warn "ROM not found: $dest"; return 1; }
+    local size; size="$(stat -c%s "$dest" 2>/dev/null || echo 0)"
+    if [ "$size" -lt 10240 ]; then   # < 10 KB = incomplete / corrupt
+      warn "ROM file too small (${size} bytes) — incomplete or corrupt"
+      sudo rm -f "$dest"
+      return 1
+    fi
+    ok "ROM file OK ✓  ($(( size / 1024 )) KB)"
+  }
+
+  _download_rom() {
+    local dest="$1"
+    info "Downloading ${GPU_ROM_FILE} → ${dest}"
+    info "(supports resume — safe to Ctrl+C and rerun)"
+    sudo mkdir -p "$(dirname "$dest")"
+    if command -v wget &>/dev/null; then
+      sudo wget --continue --show-progress --tries=5 --timeout=30 \
+           -O "$dest" "$GPU_ROM_URL"
+    else
+      sudo curl -L --retry 5 --retry-delay 5 --retry-connrefused \
+           -C - --progress-bar \
+           -o "$dest" "$GPU_ROM_URL"
+    fi
+  }
+
+  _ensure_rom() {
+    local dest="$1"
+    if [ -f "$dest" ]; then
+      info "Found existing ROM: $dest"
+    else
+      _download_rom "$dest"
+    fi
+    # Always verify — catches incomplete downloads
+    if ! _verify_rom "$dest"; then
+      _download_rom "$dest"
+      _verify_rom "$dest" || { warn "ROM still invalid after re-download. Check your connection."; exit 1; }
+    fi
+  }
 
   case "${ROM_CHOICE:-1}" in
     2)
       ask "Path to ROM file: "; read -r USER_ROM_PATH
-      if [ ! -f "$USER_ROM_PATH" ]; then
-        warn "ROM file not found: $USER_ROM_PATH"; exit 1
-      fi
+      [ -f "$USER_ROM_PATH" ] || { warn "ROM file not found: $USER_ROM_PATH"; exit 1; }
       sudo mkdir -p /usr/share/kvm
       sudo cp "$USER_ROM_PATH" "$GPU_ROM_DEST"
+      _verify_rom "$GPU_ROM_DEST" || { warn "Copied ROM appears invalid."; exit 1; }
       ;;
     *)
-      if [ ! -f "$GPU_ROM_DEST" ]; then
-        info "Downloading ${GPU_ROM_FILE} to ${GPU_ROM_DEST}..."
-        sudo mkdir -p /usr/share/kvm
-        sudo curl -fL "$GPU_ROM_URL" -o "$GPU_ROM_DEST"
-      else
-        ok "ROM already present: $GPU_ROM_DEST"
-      fi
+      _ensure_rom "$GPU_ROM_DEST"
       ;;
   esac
   ok "ROM ready at ${GPU_ROM_DEST}"
