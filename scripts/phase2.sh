@@ -1060,6 +1060,17 @@ test_vm_ssh() {
 
   local attempts=0
   while [ $attempts -lt $max ]; do
+    # Check if VM crashed / shut off unexpectedly
+    local vm_state; vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
+    if [ "$vm_state" = "shut off" ] && [ $attempts -gt 3 ]; then
+      echo ""
+      err "VM '${VM_NAME}' shut off unexpectedly — autoinstall may have failed."
+      err "Check QEMU log: sudo cat /var/log/libvirt/qemu/${VM_NAME}.log"
+      err "Or restart install: sudo virsh start ${VM_NAME} then watch: sudo virsh console ${VM_NAME}"
+      VM_SSH_RESULT="failed (VM shut off)"
+      return 1
+    fi
+
     # Prefer DHCP IP until static is assigned
     local cur_ip="$vm_ip"
     local dhcp; dhcp="$(virsh domifaddr "$VM_NAME" 2>/dev/null \
@@ -1081,10 +1092,9 @@ test_vm_ssh() {
     (( attempts++ )) || true
     if [ $(( attempts % 12 )) -eq 0 ]; then
       local elapsed=$(( attempts * 5 / 60 ))
-      local vm_state; vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
       printf "\r  [%d min] VM state: %-12s  waiting for SSH...    " "$elapsed" "$vm_state"
     else
-      printf "\r  Waiting for SSH... (%d/%d)    " "$attempts" "$max"
+      printf "\r  [VM: %-10s]  Waiting for SSH... (%d/%d)    " "$vm_state" "$attempts" "$max"
     fi
     sleep 5
   done
