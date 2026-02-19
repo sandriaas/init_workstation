@@ -138,7 +138,7 @@ check_requirements() {
     VF_COUNT="$(ls /sys/bus/pci/devices/0000:00:02.0/virtfn* 2>/dev/null | wc -l)"
     echo -e "  ${GREEN}✓${RESET} SR-IOV VFs active: ${VF_COUNT} VF(s) on 0000:00:02.0"
   else
-    echo -e "  ${YELLOW}!${RESET} SR-IOV VFs not yet active — run phase1 + reboot first"
+    echo -e "  ${YELLOW}!${RESET} SR-IOV VFs not yet active — run phase1 (step 7) + reboot first"
   fi
 
   echo ""
@@ -483,6 +483,13 @@ install_sriov_host() {
   source_vm_conf  # ensure all vm.conf vars (incl. KERNEL_GPU_ARGS) are loaded
   section "Host SR-IOV Setup (${GPU_DRIVER})"
 
+  # Skip if phase1 already configured SR-IOV kernel args
+  if grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/limine 2>/dev/null || \
+     grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/grub 2>/dev/null; then
+    ok "SR-IOV kernel args already present (set by phase1). Skipping."
+    return
+  fi
+
   # Guide warning: remove disable_vga=1 if present (breaks IGD passthrough)
   if grep -qr 'disable_vga=1' /etc/modprobe.d/ /etc/default/grub /etc/default/limine 2>/dev/null; then
     warn "Found 'disable_vga=1' in your config — this BREAKS iGPU passthrough!"
@@ -524,7 +531,7 @@ install_sriov_host() {
     if ! grep -q "${GPU_DRIVER}.max_vfs=${GPU_VF_COUNT}" /etc/default/limine 2>/dev/null; then
       sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${FULL_KERNEL_ARGS}\"/g" /etc/default/limine
     fi
-    sudo limine-install || true
+    sudo limine-update
   elif [ -f /etc/default/grub ]; then
     if ! grep -q "${GPU_DRIVER}.max_vfs=${GPU_VF_COUNT}" /etc/default/grub 2>/dev/null; then
       sudo sed -i "s/\\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\\)\"/\\1 ${FULL_KERNEL_ARGS}\"/" /etc/default/grub

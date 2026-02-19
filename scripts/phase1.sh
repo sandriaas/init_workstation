@@ -14,6 +14,12 @@ ok()      { echo -e "${GREEN}[OK]${RESET}  $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET} $*"; }
 section() { echo -e "\n${BOLD}══ $* ══${RESET}"; }
 ask()     { echo -e "${YELLOW}[?]${RESET} $*"; }
+confirm() { ask "$1 [Y/n]: "; read -r r; [[ "${r:-Y}" =~ ^[Yy]$ ]]; }
+default_if_empty() { [ -n "${1:-}" ] && echo "$1" || echo "${2:-}"; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VM_CONF="${REPO_DIR}/configs/vm.conf"
 
 # ─── Detect OS ───────────────────────────────────────────────────────────────
 detect_os() {
@@ -509,8 +515,165 @@ EOF
 
 
 # =============================================================================
-# FINAL SUMMARY — how to connect from phone + every OS
+# STEP 7: SR-IOV Host Setup (GPU gen selection + dkms + kernel args)
 # =============================================================================
+step_sriov_host() {
+  section "Step 7: Intel iGPU SR-IOV Host Setup"
+
+  # Load existing vm.conf if already done
+  [ -f "$VM_CONF" ] && source "$VM_CONF" 2>/dev/null || true
+
+  # Skip if already fully configured
+  if grep -q "i915.max_vfs=" /etc/default/limine 2>/dev/null || \
+     grep -q "i915.max_vfs=" /etc/default/grub 2>/dev/null; then
+    ok "SR-IOV kernel args already set. Skipping."
+    return
+  fi
+
+  confirm "Set up Intel iGPU SR-IOV (needed for GPU passthrough to VM)?" || { info "Skipped."; return; }
+
+  echo "Select Intel CPU generation:"
+  echo "  1   Sandy Bridge     (2nd)          Core i3/5/7 2xxx"
+  echo "  2   Ivy Bridge       (3rd)          Core i3/5/7 3xxx"
+  echo "  3   Haswell/BDW      (4th/5th)      Core i3/5/7/9 4xxx-5xxx"
+  echo "  4   Skylake->CML     (6-10th)       Core i3/5/7/9 6xxx-10xxx"
+  echo "  5   Coffee/Comet     (8-10th)       Core i3/5/7/9 8xxx-10xxx"
+  echo "  6   Gemini Lake                     Pentium/Celeron J/N 4xxx/5xxx"
+  echo "  7   Ice Lake mobile  (10th)         Core i3/5/7 10xxG1/G4/G7"
+  echo "  8   Rocket/Tiger/Alder/Raptor       Core i3/5/7/9 11xxx-14xxx (desktop/mainstream)"
+  echo "  9   Alder/Raptor Lake H/P/U mobile  Core i3/5/7/9 12xxx-14xxx H/P/U  <- i9-12900H"
+  echo " 10   Jasper Lake                     Pentium/Celeron N 4xxx/5xxx/6xxx"
+  echo " 11   Alder Lake-N / Twin Lake        N-series"
+  echo " 12   Arrow/Meteor Lake               Core Ultra (i915)"
+  echo " 13   Lunar Lake                      Core Ultra 2xx (i915)"
+  ask "Selection [9]: "; read -r GPU_GEN
+  GPU_GEN="$(default_if_empty "$GPU_GEN" "9")"
+  ask "How many VFs? [7]: "; read -r GPU_VF_COUNT
+  GPU_VF_COUNT="$(default_if_empty "$GPU_VF_COUNT" "7")"
+
+  case "$GPU_GEN" in
+    1)  GPU_DRIVER="i915"; GPU_ROM_FILE="SNB_GOPv2_igd.rom";               GPU_IGD_LPC="no"  ;;
+    2)  GPU_DRIVER="i915"; GPU_ROM_FILE="IVB_GOPv3_igd.rom";               GPU_IGD_LPC="no"  ;;
+    3)  GPU_DRIVER="i915"; GPU_ROM_FILE="HSW_BDW_GOPv5_igd.rom";           GPU_IGD_LPC="no"  ;;
+    4)  GPU_DRIVER="i915"; GPU_ROM_FILE="SKL_CML_GOPv9_igd.rom";           GPU_IGD_LPC="no"  ;;
+    5)  GPU_DRIVER="i915"; GPU_ROM_FILE="CFL_CML_GOPv9.1_igd.rom";         GPU_IGD_LPC="no"  ;;
+    6)  GPU_DRIVER="i915"; GPU_ROM_FILE="GLK_GOPv13_igd.rom";              GPU_IGD_LPC="no"  ;;
+    7)  GPU_DRIVER="i915"; GPU_ROM_FILE="ICL_GOPv14_igd.rom";              GPU_IGD_LPC="yes" ;;
+    8)  GPU_DRIVER="i915"; GPU_ROM_FILE="RKL_TGL_ADL_RPL_GOPv17_igd.rom";  GPU_IGD_LPC="yes" ;;
+    9)  GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-H_RPL-H_GOPv21_igd.rom";      GPU_IGD_LPC="yes" ;;
+    10) GPU_DRIVER="i915"; GPU_ROM_FILE="JSL_GOPv18_igd.rom";              GPU_IGD_LPC="no"  ;;
+    11) GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-N_TWL_GOPv21_igd.rom";        GPU_IGD_LPC="yes" ;;
+    12) GPU_DRIVER="i915"; GPU_ROM_FILE="ARL_MTL_GOPv22_igd.rom";          GPU_IGD_LPC="yes" ;;
+    13) GPU_DRIVER="i915"; GPU_ROM_FILE="LNL_GOPv2X_igd.rom";              GPU_IGD_LPC="yes" ;;
+    *)  GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-H_RPL-H_GOPv21_igd.rom";      GPU_IGD_LPC="yes" ;;
+  esac
+  GPU_ROM_URL="https://github.com/LongQT-sea/intel-igpu-passthru/releases/download/v0.1/${GPU_ROM_FILE}"
+  KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe"
+
+  # Write GPU vars to vm.conf so phase2 picks them up without re-asking
+  mkdir -p "${REPO_DIR}/configs"
+  if [ -f "$VM_CONF" ]; then
+    # Update existing fields
+    sed -i "s|^GPU_GEN=.*|GPU_GEN=\"${GPU_GEN}\"|"                 "$VM_CONF"
+    sed -i "s|^GPU_VF_COUNT=.*|GPU_VF_COUNT=\"${GPU_VF_COUNT}\"|"  "$VM_CONF"
+    sed -i "s|^GPU_DRIVER=.*|GPU_DRIVER=\"${GPU_DRIVER}\"|"        "$VM_CONF"
+    sed -i "s|^GPU_ROM_FILE=.*|GPU_ROM_FILE=\"${GPU_ROM_FILE}\"|"   "$VM_CONF"
+    sed -i "s|^GPU_ROM_URL=.*|GPU_ROM_URL=\"${GPU_ROM_URL}\"|"      "$VM_CONF"
+    sed -i "s|^GPU_IGD_LPC=.*|GPU_IGD_LPC=\"${GPU_IGD_LPC}\"|"     "$VM_CONF"
+    sed -i "s|^KERNEL_GPU_ARGS=.*|KERNEL_GPU_ARGS=\"${KERNEL_GPU_ARGS}\"|" "$VM_CONF"
+  else
+    # Create minimal vm.conf with GPU section only
+    cat > "$VM_CONF" <<EOF
+# vm.conf — generated by phase1.sh (GPU section only; phase2 fills the rest)
+GPU_GEN="${GPU_GEN}"
+GPU_VF_COUNT="${GPU_VF_COUNT}"
+GPU_DRIVER="${GPU_DRIVER}"
+GPU_ROM_FILE="${GPU_ROM_FILE}"
+GPU_ROM_URL="${GPU_ROM_URL}"
+GPU_ROM_PATH="\${HOME}/igd.rom"
+GPU_IGD_LPC="${GPU_IGD_LPC}"
+GPU_PASSTHROUGH="yes"
+KERNEL_GPU_ARGS="${KERNEL_GPU_ARGS}"
+EOF
+  fi
+  ok "GPU config saved to vm.conf"
+
+  # Install i915-sriov-dkms on host
+  info "Installing i915-sriov-dkms on host..."
+  case "$OS" in
+    arch)
+      if command -v paru >/dev/null 2>&1; then
+        sudo -u "$CURRENT_USER" paru -S --noconfirm --needed i915-sriov-dkms || warn "AUR install failed; install i915-sriov-dkms manually."
+      else
+        warn "paru not found. Install i915-sriov-dkms from AUR manually."
+      fi
+      ;;
+    fedora)
+      sudo dnf -y copr enable matte23/akmods || warn "Could not enable COPR"
+      sudo dnf install -y akmod-i915-sriov || warn "Could not install akmod-i915-sriov"
+      sudo akmods --force || true; sudo depmod -a || true; sudo dracut --force || true
+      ;;
+    ubuntu|proxmox)
+      if ! dpkg -s i915-sriov-dkms >/dev/null 2>&1; then
+        local_url="$(curl -fsSL https://api.github.com/repos/strongtz/i915-sriov-dkms/releases/latest \
+          | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(a["browser_download_url"] for a in d["assets"] if a["name"].endswith("_amd64.deb")))' 2>/dev/null || true)"
+        if [ -n "${local_url:-}" ]; then
+          curl -fL "$local_url" -o /tmp/i915-sriov-dkms_latest_amd64.deb
+          sudo dpkg -i /tmp/i915-sriov-dkms_latest_amd64.deb || sudo apt-get install -f -y
+        else
+          warn "Could not resolve i915-sriov-dkms .deb URL; install manually."
+        fi
+      fi
+      ;;
+  esac
+
+  # Patch kernel args for SR-IOV
+  FULL_KERNEL_ARGS="intel_iommu=on iommu=pt ${KERNEL_GPU_ARGS}"
+  if [ -f /etc/default/limine ]; then
+    if ! grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/limine 2>/dev/null; then
+      sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${KERNEL_GPU_ARGS}\"/g" /etc/default/limine
+    fi
+    sudo limine-update
+    ok "Limine updated with SR-IOV args."
+  elif [ -f /etc/default/grub ]; then
+    if ! grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/grub 2>/dev/null; then
+      sudo sed -i "s/\\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\\)\"/\\1 ${KERNEL_GPU_ARGS}\"/" /etc/default/grub
+    fi
+    case "$OS" in
+      arch)           sudo grub-mkconfig -o /boot/grub/grub.cfg ;;
+      ubuntu|proxmox) sudo update-grub ;;
+      fedora)         sudo grub2-mkconfig -o /boot/grub2/grub.cfg ;;
+    esac
+    ok "GRUB updated with SR-IOV args."
+  fi
+
+  # Enable VF creation at boot
+  if [ -f /etc/tmpfiles.d/i915-set-sriov-numvfs.conf ]; then
+    sudo sed -i "s|^#*w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs.*|w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs - - - - ${GPU_VF_COUNT}|" \
+      /etc/tmpfiles.d/i915-set-sriov-numvfs.conf
+  else
+    if ! grep -q "sriov_numvfs" /etc/sysfs.conf 2>/dev/null; then
+      echo "devices/pci0000:00/0000:00:02.0/sriov_numvfs = ${GPU_VF_COUNT}" | sudo tee -a /etc/sysfs.conf >/dev/null
+    fi
+  fi
+
+  # Load vfio-pci + udev rule to bind VFs
+  echo "vfio-pci" | sudo tee /etc/modules-load.d/vfio.conf >/dev/null
+  DEVICE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//' || echo "a7a0")"
+  sudo tee /etc/udev/rules.d/99-i915-vf-vfio.rules >/dev/null <<EOF
+ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:00:02.[1-7]", ATTR{vendor}=="0x8086", ATTR{device}=="0x${DEVICE_ID}", DRIVER!="vfio-pci", RUN+="/bin/sh -c 'echo \$kernel > /sys/bus/pci/devices/\$kernel/driver/unbind; echo vfio-pci > /sys/bus/pci/devices/\$kernel/driver_override; modprobe vfio-pci; echo \$kernel > /sys/bus/pci/drivers/vfio-pci/bind'"
+EOF
+
+  case "$OS" in
+    arch)           sudo mkinitcpio -P || true ;;
+    ubuntu|proxmox) sudo update-initramfs -u || true ;;
+    fedora)         sudo dracut --force || true ;;
+  esac
+
+  ok "SR-IOV host setup done. VFs will be active after reboot."
+}
+
+
 print_final_summary() {
   # Try temp file first (written by step_cloudflare_tunnel if it ran this session)
   TUNNEL_HOST_SAVED=""
@@ -580,7 +743,7 @@ main() {
   check_requirements
 
   echo ""
-  info "Steps: packages → IOMMU → sleep → static IP → SSH → Cloudflare tunnel"
+  info "Steps: packages → IOMMU → sleep → static IP → SSH → Cloudflare tunnel → SR-IOV"
   confirm "Proceed with Phase 1 setup?" || { echo "Aborted."; exit 0; }
 
   step_packages
@@ -589,6 +752,7 @@ main() {
   step_static_ip
   step_ssh
   step_cloudflare_tunnel
+  step_sriov_host
   print_final_summary
 }
 
