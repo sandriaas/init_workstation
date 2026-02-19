@@ -229,7 +229,8 @@ prompt_resource_and_vm_basics() {
   TOTAL_RAM_GB="$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)"
 
   # Default VM name: vm_N where N = next available number
-  local _existing_count; _existing_count="$(virsh list --all --name 2>/dev/null | grep -c "^vm_" || echo 0)"
+  local _existing_count; _existing_count="$(virsh list --all --name 2>/dev/null | grep "^vm_" | wc -l)"
+  _existing_count="${_existing_count//[^0-9]/}"  # strip whitespace/newlines
   VM_NAME_DEFAULT="vm_$(( _existing_count + 1 ))"
   VM_USER_DEFAULT="$CURRENT_USER"
   VM_HOSTNAME_DEFAULT="ubuntu-server"
