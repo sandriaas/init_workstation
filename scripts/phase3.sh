@@ -22,6 +22,9 @@ info()    { echo -e "${CYAN}[INFO]${RESET} $*"; }
 ok()      { echo -e "${GREEN}[OK]${RESET}  $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET} $*"; }
 err()     { echo -e "${RED}[ERR]${RESET}  $*" >&2; }
+
+# Error trap — show file:line on unexpected exit
+trap '_ec=$?; [ $_ec -ne 0 ] && err "Script failed at line ${LINENO} (exit code ${_ec}) in ${FUNCNAME[0]:-main}()" >&2' ERR
 section() {
   local conf_hint=""
   [ -n "${VM_CONF:-}" ] && [ -f "${VM_CONF}" ] && \

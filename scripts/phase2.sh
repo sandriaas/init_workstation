@@ -6,10 +6,14 @@
 
 set -euo pipefail
 
-GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
 info()    { echo -e "${CYAN}[INFO]${RESET} $*"; }
 ok()      { echo -e "${GREEN}[OK]${RESET}  $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET} $*"; }
+err()     { echo -e "${RED}[ERR]${RESET}  $*" >&2; }
+
+# Error trap — show file:line on unexpected exit
+trap '_ec=$?; [ $_ec -ne 0 ] && err "Script failed at line ${LINENO} (exit code ${_ec}) in ${FUNCNAME[0]:-main}()" >&2' ERR
 section() {
   local conf_hint=""
   [ -n "${VM_CONF:-}" ] && [ -f "${VM_CONF}" ] && \
@@ -761,9 +765,9 @@ install_sriov_host() {
   FULL_KERNEL_ARGS="intel_iommu=on iommu=pt ${KERNEL_GPU_ARGS}"
   if [ -f /etc/default/limine ]; then
     if ! grep -q "${GPU_DRIVER}.max_vfs=${GPU_VF_COUNT}" /etc/default/limine 2>/dev/null; then
-      sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${FULL_KERNEL_ARGS}\"/g" /etc/default/limine
+      sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${FULL_KERNEL_ARGS}\"/g" /etc/default/limine || true
     fi
-    sudo limine-update
+    sudo limine-update || warn "limine-update failed — regenerate boot config manually"
   elif [ -f /etc/default/grub ]; then
     if ! grep -q "${GPU_DRIVER}.max_vfs=${GPU_VF_COUNT}" /etc/default/grub 2>/dev/null; then
       sudo sed -i "s/\\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\\)\"/\\1 ${FULL_KERNEL_ARGS}\"/" /etc/default/grub
@@ -784,7 +788,7 @@ install_sriov_host() {
   fi
 
   echo "vfio-pci" | sudo tee /etc/modules-load.d/vfio.conf >/dev/null
-  DEVICE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//')"
+  DEVICE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//' || true)"
   [ -n "${DEVICE_ID:-}" ] || DEVICE_ID="a7a0"
   sudo tee /etc/udev/rules.d/99-i915-vf-vfio.rules >/dev/null <<EOF
 ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:00:02.[1-7]", ATTR{vendor}=="0x8086", ATTR{device}=="0x${DEVICE_ID}", DRIVER!="vfio-pci", RUN+="/bin/sh -c 'echo \$kernel > /sys/bus/pci/devices/\$kernel/driver/unbind; echo vfio-pci > /sys/bus/pci/devices/\$kernel/driver_override; modprobe vfio-pci; echo \$kernel > /sys/bus/pci/drivers/vfio-pci/bind'"
@@ -914,7 +918,7 @@ create_vm() {
     # Machine type must be pc (i440fx) for legacy IGD passthrough — NOT q35
     # --location extracts kernel/initrd from ISO for extra-args injection
     # shellcheck disable=SC2086
-    sudo virt-install \
+    if ! sudo virt-install \
       --name "$VM_NAME" \
       --memory "$VM_RAM_MB" \
       --vcpus "$VM_VCPUS" \
@@ -930,7 +934,14 @@ create_vm() {
       --location "${VM_ISO_PATH},kernel=casper/vmlinuz,initrd=casper/initrd" \
       ${seed_disk_arg} \
       ${extra_args:+--extra-args "$extra_args"} \
-      --noautoconsole
+      --noautoconsole; then
+      err "virt-install failed! Check the error above."
+      err "Common fixes: missing OVMF firmware, invalid ISO path, or libvirtd not running."
+      err "  ISO path:   ${VM_ISO_PATH}"
+      err "  Disk path:  ${VM_DISK_PATH}"
+      err "  VM name:    ${VM_NAME}"
+      return 1
+    fi
 
     if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
       ok "VM created with autoinstall. Ubuntu is installing unattended."
@@ -1274,7 +1285,37 @@ main() {
   install_sriov_host
   create_vm
   write_state
-  test_vm_ssh
+
+  # ── Start VM + wait for SSH ──────────────────────────────────────────────────
+  section "Start VM & Verify SSH"
+  source_vm_conf
+  local vm_state; vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo "not defined")"
+  info "VM '${VM_NAME}' current state: ${vm_state}"
+
+  if [ "$vm_state" != "running" ]; then
+    echo ""
+    echo "  1) Start VM now  (recommended — begin Ubuntu install)"
+    echo "  2) Skip — start later manually"
+    ask "Choice [1/2, default=1]: "; read -r _start_choice
+    if [ "${_start_choice:-1}" != "2" ]; then
+      sudo virsh start "$VM_NAME" 2>/dev/null && ok "VM '${VM_NAME}' started." \
+        || warn "Failed to start VM — check: virsh start ${VM_NAME}"
+    else
+      info "Skipping VM start. Start manually: sudo virsh start ${VM_NAME}"
+    fi
+  else
+    ok "VM '${VM_NAME}' is already running."
+  fi
+
+  # ── Track VM state + wait for SSH ────────────────────────────────────────────
+  vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo "not running")"
+  if [ "$vm_state" = "running" ]; then
+    test_vm_ssh
+  else
+    VM_SSH_RESULT="VM not running — skipped"
+    warn "VM not running. SSH test skipped."
+  fi
+
   _snap_post "phase2 vm provision complete"
   print_summary
 }
