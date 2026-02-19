@@ -525,13 +525,41 @@ _check_sriov_kernel_boot() {
       fi
     fi
   elif [ -f /etc/default/grub ]; then
-    sudo sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"${COMPAT_KERNEL}\"|" /etc/default/grub
+    # Determine grub.cfg path per distro
+    local GRUB_CFG
     case "$OS" in
-      arch)           sudo grub-mkconfig -o /boot/grub/grub.cfg ;;
-      ubuntu|proxmox) sudo update-grub ;;
-      fedora)         sudo grub2-mkconfig -o /boot/grub2/grub.cfg ;;
+      fedora) GRUB_CFG="/boot/grub2/grub.cfg" ;;
+      *)      GRUB_CFG="/boot/grub/grub.cfg"  ;;
     esac
-    ok "GRUB default boot → ${COMPAT_KERNEL}"
+    # Generate grub.cfg first so we can read actual entry titles
+    case "$OS" in
+      arch)           sudo grub-mkconfig -o "$GRUB_CFG" ;;
+      ubuntu|proxmox) sudo update-grub ;;
+      fedora)         sudo grub2-mkconfig -o "$GRUB_CFG" ;;
+    esac
+    # Parse grub.cfg to find the entry title (or submenu>title path) for COMPAT_KERNEL.
+    # Handles both flat (Arch) and nested submenu (Ubuntu/Fedora) layouts.
+    # Uses entry title string — more robust than numeric index.
+    GRUB_ENTRY="$(sudo awk -v kern="$COMPAT_KERNEL" '
+      /^submenu / { match($0,/['\''"][^'\''"]*/); sub_title=substr($0,RSTART+1,RLENGTH-1); in_sub=1 }
+      /^}/ && in_sub { in_sub=0; sub_title="" }
+      /menuentry / && $0 ~ kern && !/recovery|rescue/ {
+        match($0,/['\''"][^'\''"]*/); title=substr($0,RSTART+1,RLENGTH-1)
+        print (in_sub ? sub_title ">" title : title); exit
+      }
+    ' "$GRUB_CFG" 2>/dev/null || true)"
+    if [ -n "${GRUB_ENTRY:-}" ]; then
+      sudo sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"${GRUB_ENTRY}\"|" /etc/default/grub
+      # Regenerate with updated GRUB_DEFAULT
+      case "$OS" in
+        arch)           sudo grub-mkconfig -o "$GRUB_CFG" ;;
+        ubuntu|proxmox) sudo update-grub ;;
+        fedora)         sudo grub2-mkconfig -o "$GRUB_CFG" ;;
+      esac
+      ok "GRUB default boot → \"${GRUB_ENTRY}\""
+    else
+      warn "Could not find GRUB entry for ${COMPAT_KERNEL} — set GRUB_DEFAULT manually in /etc/default/grub"
+    fi
   elif [ -d /boot/loader/entries ]; then
     SD_ENTRY="$(grep -rl "${COMPAT_KERNEL}" /boot/loader/entries/ 2>/dev/null | head -1 | xargs basename 2>/dev/null || true)"
     if [ -n "${SD_ENTRY:-}" ]; then
