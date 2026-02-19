@@ -268,7 +268,7 @@ step_iommu() {
       # Patch ALL KERNEL_CMDLINE entries (default + any named kernels e.g. lts, zen, hardened)
       sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${IOMMU_ARGS}\"/g" /etc/default/limine
     fi
-    sudo limine-install
+    sudo limine-update
     ok "Limine updated — applied to all kernel entries. Active after reboot."
 
   elif [ -f /etc/default/grub ]; then
