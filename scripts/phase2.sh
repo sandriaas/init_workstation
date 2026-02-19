@@ -632,8 +632,15 @@ prompt_tunnel() {
 
   echo ""
   VM_TUNNEL_NAME_DEFAULT="${VM_NAME}-ssh"
-  VM_TUNNEL_HOST_DEFAULT="vm-$(tr -dc a-z0-9 </dev/urandom | head -c 8 || true).${HOST_TUNNEL_DOMAIN}"
-  echo -e "  VM tunnel will be a ${YELLOW}new${RESET} tunnel on the same domain."
+  # Always generate a fresh random suffix for VM hostname — guaranteed different from host
+  local _vm_suffix; _vm_suffix="$(tr -dc a-z0-9 </dev/urandom | head -c 8)"
+  local _host_suffix="${HOST_TUNNEL_HOST%%.*}"  # prefix of host tunnel
+  # Regenerate if collision (extremely unlikely but safe)
+  while [ "${_vm_suffix}" = "${_host_suffix}" ]; do
+    _vm_suffix="$(tr -dc a-z0-9 </dev/urandom | head -c 8)"
+  done
+  VM_TUNNEL_HOST_DEFAULT="vm-${_vm_suffix}.${HOST_TUNNEL_DOMAIN}"
+  echo -e "  VM tunnel will be a ${YELLOW}separate${RESET} tunnel (different hostname from host)."
   ask "VM tunnel name [${VM_TUNNEL_NAME_DEFAULT}]: "; read -r VM_TUNNEL_NAME
   ask "VM tunnel hostname [${VM_TUNNEL_HOST_DEFAULT}]: "; read -r VM_TUNNEL_HOST
   VM_TUNNEL_NAME="$(default_if_empty "$VM_TUNNEL_NAME" "$VM_TUNNEL_NAME_DEFAULT")"

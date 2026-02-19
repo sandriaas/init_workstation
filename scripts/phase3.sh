@@ -495,40 +495,42 @@ REMOTE
 }
 
 # =============================================================================
-# Test cloudflared SSH tunnel from host → VM
-# Uses 'cloudflared access ssh' (already installed by phase1) — correct for token tunnels
+# Test cloudflared tunnel via websocat SSH (same method as phase1/phase3 client)
+# ProxyCommand: websocat -E --binary - wss://%h
 # =============================================================================
 CF_TUNNEL_RESULT="not tested"
 test_cf_tunnel() {
   [ -n "${VM_TUNNEL_HOST:-}" ] || { CF_TUNNEL_RESULT="no VM_TUNNEL_HOST configured"; return; }
-  info "Testing cloudflared SSH tunnel → ${VM_TUNNEL_HOST}..."
+  info "Testing SSH tunnel → ${VM_TUNNEL_HOST} (via websocat)..."
 
-  # cloudflared is installed on host by phase1 — use 'access ssh' ProxyCommand
-  if ! command -v cloudflared &>/dev/null; then
-    CF_TUNNEL_RESULT="cloudflared not on host PATH (run phase1 first)"
+  if ! command -v websocat &>/dev/null; then
+    CF_TUNNEL_RESULT="websocat not found (run phase1 to install)"
     warn "$CF_TUNNEL_RESULT"; return
   fi
 
   local attempts=0
   while [ $attempts -lt 6 ]; do
     if ssh \
-         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+         -o StrictHostKeyChecking=no \
+         -o UserKnownHostsFile=/dev/null \
          -o ConnectTimeout=10 \
          -o BatchMode=yes \
-         -o "ProxyCommand=cloudflared access ssh --hostname %h" \
+         -o "ProxyCommand=websocat -E --binary - wss://%h" \
          "${VM_SSH_USER}@${VM_TUNNEL_HOST}" true 2>/dev/null; then
       CF_TUNNEL_RESULT="✓  working"
-      ok "Cloudflared SSH tunnel working: ssh ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
+      ok "Tunnel SSH working:  ssh ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
       return
     fi
     (( attempts++ )) || true
-    [ $attempts -lt 6 ] && sleep 10
+    [ $attempts -lt 6 ] && { info "Not reachable yet (${attempts}/6) — waiting 10s..."; sleep 10; }
   done
 
-  CF_TUNNEL_RESULT="not reachable yet — tunnel may need 1-2 min after first install"
-  warn "Cloudflared SSH tunnel not reachable yet."
-  warn "  Retry: ssh -o ProxyCommand='cloudflared access ssh --hostname %h' ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
-  warn "  Also check tunnel status in VM: ssh ${VM_SSH_USER}@${VM_STATIC_IP%/*} 'systemctl status cloudflared'"
+  CF_TUNNEL_RESULT="not reachable yet (DNS may still propagate)"
+  warn "Tunnel SSH not reachable yet. Check in VM:"
+  warn "  sudo systemctl status cloudflared"
+  warn "  sudo journalctl -u cloudflared -n 20"
+  warn "Manual connect (after reachable):"
+  warn "  ssh -o ProxyCommand='websocat -E --binary - wss://%h' ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
 }
 update_vm_conf() {
   [ -f "$VM_CONF" ] || return
@@ -594,7 +596,7 @@ print_summary() {
   printf "  %-24s %s\n" "Direct (LAN):"       "ssh ${VM_SSH_USER}@${vm_ip}"
   printf "  %-24s %s\n" "Via host tunnel:"     "ssh ${VM_SSH_USER}@${HOST_TUNNEL_HOST}"
   printf "  %-24s %s\n" "VM tunnel status:"    "${CF_TUNNEL_RESULT:-not tested}"
-  printf "  %-24s %s\n" "Via VM tunnel:"       "ssh -o ProxyCommand='cloudflared access ssh --hostname %h' ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
+  printf "  %-24s %s\n" "Via VM tunnel:"       "ssh -o ProxyCommand='websocat -E --binary - wss://%h' ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
   echo ""
   echo -e "${BOLD}  ── Files ───────────────────────────────────────────────────${RESET}"
   printf "  %-18s %s\n" "VM conf:" "$VM_CONF"
