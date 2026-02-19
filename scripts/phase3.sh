@@ -337,17 +337,32 @@ run_remote_setup() {
   sudo iptables -t nat -C POSTROUTING -s 192.168.122.0/24 ! -d 192.168.122.0/24 -j MASQUERADE 2>/dev/null \
     || sudo iptables -t nat -A POSTROUTING -s 192.168.122.0/24 ! -d 192.168.122.0/24 -j MASQUERADE 2>/dev/null || true
 
-  # Prompt for tunnel token on HOST (before SSH — no TTY inside remote heredoc)
+  # Prompt for tunnel token + confirm hostname on HOST (before SSH — no TTY inside remote heredoc)
   local VM_TUNNEL_TOKEN="${VM_TUNNEL_TOKEN:-}"
   if [ -z "$VM_TUNNEL_TOKEN" ]; then
     echo ""
     echo "  ── Cloudflare Tunnel Token ────────────────────────────────"
     echo "  Get from: dash.cloudflare.com → Zero Trust → Networks → Tunnels"
-    echo "  Select tunnel '${VM_TUNNEL_NAME}' → Configure → Install connector → token"
+    echo "  Select your tunnel → Configure → Install connector → copy token"
     echo ""
     read -r -p "  Paste tunnel token (Enter to skip): " VM_TUNNEL_TOKEN
     echo ""
   fi
+
+  # Confirm/update the VM tunnel hostname to match Cloudflare dashboard
+  echo "  ── Confirm VM Tunnel Hostname ─────────────────────────────"
+  echo "  Current: ${VM_TUNNEL_HOST}"
+  echo "  This must match the Public Hostname configured in the Cloudflare dashboard"
+  echo "  for this tunnel. Press Enter to keep current."
+  echo ""
+  read -r -p "  VM tunnel hostname [${VM_TUNNEL_HOST}]: " _new_host
+  if [ -n "${_new_host:-}" ] && [ "$_new_host" != "$VM_TUNNEL_HOST" ]; then
+    VM_TUNNEL_HOST="$_new_host"
+    # Persist to conf immediately so test_cf_tunnel uses the right hostname
+    sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
+    ok "VM_TUNNEL_HOST updated → ${VM_TUNNEL_HOST}"
+  fi
+  echo ""
 
   ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_SSH_USER}@${VM_SSH_HOST}" \
     "VM_NAME='${VM_NAME}' \
