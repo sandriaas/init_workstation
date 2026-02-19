@@ -1,13 +1,84 @@
 # init_workstation — Rev5.7.2
 
-> Zero-to-hero workstation setup: CachyOS host → Cloudflare SSH tunnel → KVM Ubuntu VM
+> Zero-to-hero workstation setup: CachyOS host → Cloudflare SSH tunnel → KVM Ubuntu VM with Intel iGPU SR-IOV passthrough
 
 **Machine:** Intel Core i9-12900H · 24GB RAM · CachyOS (Limine bootloader, BTRFS)
 **Domain:** `easyrentbali.com` (Cloudflare) · **User:** `sandriaas`
 
 ---
 
-## Table of Contents
+## ⚡ Quickstart
+
+### Option A — curl (no git required)
+
+```bash
+# Phase 1: Host setup (packages, IOMMU, static IP, SSH, Cloudflare tunnel)
+bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1.sh)
+
+# → Reboot after phase 1 ←
+sudo reboot
+
+# Phase 2: Create KVM VM + SR-IOV host prep (run after reboot)
+bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase2.sh)
+
+# Phase 3: Configure VM internals (SSH, cloudflared, static IP, i915-sriov-dkms)
+bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3.sh)
+
+# Client: configure SSH on your phone/laptop to connect via Cloudflare tunnel
+bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)
+```
+
+### Option B — git clone and run locally
+
+```bash
+git clone https://github.com/sandriaas/init_workstation.git
+cd init_workstation
+
+# Phase 1
+sudo bash scripts/phase1.sh
+
+# → Reboot ←
+sudo reboot
+
+# Phase 2 (edit configs/vm.conf first if you want to pre-set values)
+sudo bash scripts/phase2.sh
+
+# Phase 3
+sudo bash scripts/phase3.sh
+
+# Client (no sudo needed)
+bash scripts/phase1-client.sh
+```
+
+### Script flow
+
+```
+phase1.sh ──────────────────────────────────────► reboot
+  └─ packages + IOMMU + sleep mask + static IP
+     + SSH + Cloudflare tunnel (systemd service)
+
+                        phase2.sh ───────────────► vm.conf written
+                          └─ prompt: CPU/RAM/disk/ISO/GPU gen/ROM
+                             detect system specs
+                             download ROM → /usr/share/kvm/igd.rom
+                             install i915-sriov-dkms (host)
+                             patch kernel args (limine/grub)
+                             virt-install (i440fx/OVMF/headless)
+                             attach virtiofs + VF hostdev XML
+
+                                        phase3.sh ──────────────► VM ready
+                                          └─ SSH into VM
+                                             packages + dkms + headers
+                                             i915-sriov-dkms (guest)
+                                             static IP + cloudflared
+                                             websocat tunnel
+
+phase1-client.sh  (run on phone/laptop/desktop)
+  └─ install websocat + openssh
+     write ~/.ssh/config → ssh minipc / ssh server-vm
+```
+
+---
 
 1. [Phase 0 — Pre-Install Prep + BIOS](#phase-0--pre-install-prep--bios)
 2. [Phase 1 — Host Setup](#phase-1--host-setup)
