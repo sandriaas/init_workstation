@@ -621,7 +621,7 @@ main() {
   echo ""
   echo "  ── VM Tunnel Hostname ──────────────────────────────────"
   local _domain="${HOST_TUNNEL_DOMAIN:-${VM_TUNNEL_HOST#*.}}"
-  local _new_suffix; _new_suffix="vm-$(tr -dc a-z0-9 </dev/urandom | head -c 8)"
+  local _new_suffix; _new_suffix="vm-$(tr -dc a-z0-9 </dev/urandom 2>/dev/null | head -c 8; true)"
   echo "  Domain:              ${_domain}"
   echo "  Auto-generated:      ${_new_suffix}.${_domain}"
   read -r -p "  Subdomain [${_new_suffix}]: " _input_sub
