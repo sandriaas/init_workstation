@@ -1,3 +1,4 @@
 *.json
 *.credentials
-configs/vm.conf
+generated-vm/*
+!generated-vm/.gitkeep

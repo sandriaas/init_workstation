@@ -16,7 +16,8 @@ section() { echo -e "\n${BOLD}══ $* ══${RESET}"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-VM_CONF="${REPO_DIR}/configs/vm.conf"
+VM_CONF_DIR="${REPO_DIR}/generated-vm"
+VM_CONF="$(ls "${VM_CONF_DIR}"/*.conf 2>/dev/null | head -1 || echo "${VM_CONF_DIR}/server-vm.conf")
 
 PASS=0; WARN=0; FAIL=0
 pass() { ok "$*";  PASS=$((PASS+1)); }

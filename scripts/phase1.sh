@@ -19,7 +19,9 @@ default_if_empty() { [ -n "${1:-}" ] && echo "$1" || echo "${2:-}"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-VM_CONF="${REPO_DIR}/configs/vm.conf"
+VM_CONF_DIR="${REPO_DIR}/generated-vm"
+# Auto-detect generated conf; default to server-vm.conf if not found
+VM_CONF="$(ls "${VM_CONF_DIR}"/*.conf 2>/dev/null | head -1 || echo "${VM_CONF_DIR}/server-vm.conf")"
 
 # ─── Detect OS ───────────────────────────────────────────────────────────────
 detect_os() {
