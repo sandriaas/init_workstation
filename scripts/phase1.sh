@@ -580,7 +580,29 @@ EOF
       ;;
   esac
 
-  # 2. Load vfio-pci + udev rule to bind VFs at boot
+  # Check if dkms built for running kernel — if excluded, set LTS as default boot
+  RUNNING_KERNEL="$(uname -r)"
+  if ! dkms status 2>/dev/null | grep -q "i915-sriov.*${RUNNING_KERNEL}"; then
+    # Find an LTS kernel the module DID build for
+    LTS_KERNEL="$(dkms status 2>/dev/null | grep "i915-sriov" | awk -F'[, ]+' '{print $2}' | head -1)"
+    if [ -n "${LTS_KERNEL:-}" ]; then
+      warn "i915-sriov-dkms is NOT built for running kernel (${RUNNING_KERNEL})."
+      warn "It is built for: ${LTS_KERNEL} — SR-IOV requires booting that kernel."
+      if [ -f /etc/default/limine ]; then
+        # Set default boot to lts entry
+        if ! grep -q "^DEFAULT_ENTRY=" /etc/default/limine 2>/dev/null; then
+          echo 'DEFAULT_ENTRY="*lts"' | sudo tee -a /etc/default/limine >/dev/null
+        else
+          sudo sed -i 's|^DEFAULT_ENTRY=.*|DEFAULT_ENTRY="*lts"|' /etc/default/limine
+        fi
+        sudo limine-update
+        ok "Limine default boot set to LTS kernel (${LTS_KERNEL})."
+      fi
+      warn "After reboot you will be on ${LTS_KERNEL} — SR-IOV will be active."
+    else
+      warn "i915-sriov-dkms built for no kernel yet — check dkms status after reboot."
+    fi
+  fi
   echo "vfio-pci" | sudo tee /etc/modules-load.d/vfio.conf >/dev/null
   DEVICE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//' || echo "a7a0")"
   sudo tee /etc/udev/rules.d/99-i915-vf-vfio.rules >/dev/null <<EOF
