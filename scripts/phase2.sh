@@ -928,21 +928,33 @@ create_vm() {
   if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     ok "VM '${VM_NAME}' already exists. Skipping virt-install."
   else
-    # ── Generate autoinstall user-data if enabled ─────────────────────────────
-    local cloud_init_arg=""
+    # ── Generate autoinstall user-data and serve via HTTP ─────────────────────
+    # Official Canonical method: serve user-data over HTTP from host.
+    # The VM reaches the host via the libvirt bridge gateway (192.168.122.1).
+    # --cloud-init with --location is bugged on non-Ubuntu virt-install builds
+    # (Launchpad #2073461) — HTTP avoids that entirely.
+    local http_pid="" http_port=3003
     if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
       generate_autoinstall
       local seed_dir="${VM_CONF_DIR}/${VM_NAME}-seed"
-      # virt-install 4.0+ supports --cloud-init with --location (bug fixed upstream)
-      # This is cleaner than a seed ISO and avoids nocloud block device discovery issues
-      cloud_init_arg="--cloud-init user-data=${seed_dir}/user-data,meta-data=${seed_dir}/meta-data"
+      # Pick a free port
+      while ss -tlnp 2>/dev/null | grep -q ":${http_port} "; do
+        (( http_port++ )) || true
+      done
+      python3 -m http.server "$http_port" --directory "$seed_dir" \
+        --bind 192.168.122.1 >/dev/null 2>&1 &
+      http_pid=$!
+      info "Serving cloud-init data at http://192.168.122.1:${http_port}/ (pid ${http_pid})"
       info "Ubuntu autoinstall enabled — installation will run unattended (~10-15 min)"
     fi
 
     # Machine type must be pc (i440fx) for legacy IGD passthrough — NOT q35
     # --location extracts kernel/initrd from ISO for extra-args injection
-    # --noautoconsole: subiquity autoinstall is always silent on serial console
-    # shellcheck disable=SC2086
+    # ds=nocloud-net: cloud-init fetches user-data/meta-data via HTTP from host gateway
+    # _gateway resolves to default route inside the installer (192.168.122.1)
+    local extra_args="autoinstall"
+    [ "${VM_AUTOINSTALL:-yes}" = "yes" ] && extra_args="autoinstall ds=nocloud-net;s=http://192.168.122.1:${http_port}/"
+
     if ! sudo virt-install \
       --name "$VM_NAME" \
       --memory "$VM_RAM_MB" \
@@ -957,18 +969,24 @@ create_vm() {
       --video "${VM_VIDEO:-none}" \
       --console "${VM_CONSOLE:-pty,target_type=serial}" \
       --location "${iso_path},kernel=casper/vmlinuz,initrd=casper/initrd" \
-      --extra-args "autoinstall ds=nocloud" \
-      ${cloud_init_arg} \
+      --extra-args "$extra_args" \
       --noautoconsole; then
       err "virt-install failed! Check the error above."
       err "Common fixes: missing OVMF firmware, invalid ISO path, or libvirtd not running."
       err "  ISO path:   ${iso_path}"
       err "  Disk path:  ${VM_DISK_PATH}"
       err "  VM name:    ${VM_NAME}"
-      # Clean up partial disk so next run doesn't fail on existing file
+      [ -n "$http_pid" ] && kill "$http_pid" 2>/dev/null || true
       [ -f "$VM_DISK_PATH" ] && sudo rm -f "$VM_DISK_PATH" && warn "Removed partial disk: ${VM_DISK_PATH}"
       sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || sudo virsh undefine "$VM_NAME" 2>/dev/null || true
       return 1
+    fi
+
+    # HTTP server only needed until installer fetches data (first ~30s), kill after VM starts
+    if [ -n "$http_pid" ]; then
+      sleep 30
+      kill "$http_pid" 2>/dev/null || true
+      info "cloud-init HTTP server stopped."
     fi
 
     if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
