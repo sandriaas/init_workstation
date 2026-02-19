@@ -333,37 +333,8 @@ run_remote_setup() {
   sudo ufw route allow in on virbr0 out on virbr0 >/dev/null 2>&1 || true
   sudo ufw route allow in on virbr0 >/dev/null 2>&1 || true
   sudo ufw route allow out on virbr0 >/dev/null 2>&1 || true
-  # Also ensure iptables masquerade for libvirt NAT (in case it got flushed)
   sudo iptables -t nat -C POSTROUTING -s 192.168.122.0/24 ! -d 192.168.122.0/24 -j MASQUERADE 2>/dev/null \
     || sudo iptables -t nat -A POSTROUTING -s 192.168.122.0/24 ! -d 192.168.122.0/24 -j MASQUERADE 2>/dev/null || true
-
-  # Prompt for tunnel token + confirm hostname on HOST (before SSH — no TTY inside remote heredoc)
-  local VM_TUNNEL_TOKEN="${VM_TUNNEL_TOKEN:-}"
-  if [ -z "$VM_TUNNEL_TOKEN" ]; then
-    echo ""
-    echo "  ── Cloudflare Tunnel Token ────────────────────────────────"
-    echo "  Get from: dash.cloudflare.com → Zero Trust → Networks → Tunnels"
-    echo "  Select your tunnel → Configure → Install connector → copy token"
-    echo ""
-    read -r -p "  Paste tunnel token (Enter to skip): " VM_TUNNEL_TOKEN
-    echo ""
-  fi
-
-  # VM tunnel hostname — auto-generate fresh random subdomain, user only inputs subdomain part
-  local _domain="${HOST_TUNNEL_DOMAIN:-${VM_TUNNEL_HOST#*.}}"
-  local _new_suffix; _new_suffix="vm-$(tr -dc a-z0-9 </dev/urandom | head -c 8)"
-  local _new_default="${_new_suffix}.${_domain}"
-  echo "  ── VM Tunnel Hostname ──────────────────────────────────"
-  echo "  Domain: ${_domain}"
-  echo "  Auto-generated subdomain: ${_new_suffix}  (full: ${_new_default})"
-  echo "  Enter a custom subdomain or press Enter to use the generated one."
-  echo ""
-  read -r -p "  Subdomain [${_new_suffix}]: " _input_sub
-  local _final_sub="${_input_sub:-${_new_suffix}}"
-  VM_TUNNEL_HOST="${_final_sub}.${_domain}"
-  sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
-  ok "VM tunnel hostname → ${VM_TUNNEL_HOST}"
-  echo ""
 
   ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_SSH_USER}@${VM_SSH_HOST}" \
     "VM_NAME='${VM_NAME}' \
@@ -646,8 +617,33 @@ main() {
   # Step 2: poll SSH until reachable
   wait_for_ssh
 
+  # ── Always prompt for tunnel token + hostname (host-side, before any SSH heredoc) ──
+  echo ""
+  echo "  ── VM Tunnel Hostname ──────────────────────────────────"
+  local _domain="${HOST_TUNNEL_DOMAIN:-${VM_TUNNEL_HOST#*.}}"
+  local _new_suffix; _new_suffix="vm-$(tr -dc a-z0-9 </dev/urandom | head -c 8)"
+  echo "  Domain:              ${_domain}"
+  echo "  Auto-generated:      ${_new_suffix}.${_domain}"
+  read -r -p "  Subdomain [${_new_suffix}]: " _input_sub
+  local _final_sub="${_input_sub:-${_new_suffix}}"
+  VM_TUNNEL_HOST="${_final_sub}.${_domain}"
+  sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
+  ok "VM tunnel hostname → ${VM_TUNNEL_HOST}"
+
+  echo ""
+  echo "  ── Cloudflare Tunnel Token ────────────────────────────────"
+  echo "  Get from: dash.cloudflare.com → Zero Trust → Networks → Tunnels"
+  echo "  Select your tunnel → Configure → Install connector → copy token"
+  echo ""
+  local VM_TUNNEL_TOKEN="${VM_TUNNEL_TOKEN:-}"
+  read -r -p "  Paste tunnel token (Enter to skip): " VM_TUNNEL_TOKEN
+  echo ""
+
+  # Export so run_remote_setup and the step-8b-only path can use them
+  export VM_TUNNEL_HOST VM_TUNNEL_TOKEN
+
   # Steps 3–8: configure VM internals over SSH
-  # Skip full setup only if cloudflared is active AND tunnel is registered with Cloudflare
+  # Skip full setup only if cloudflared active + tunnel connected AND no new token provided
   local _cf_running _cf_connected
   _cf_running="$(ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=5 -o BatchMode=yes "${VM_SSH_USER}@${VM_SSH_HOST}" \
@@ -657,10 +653,22 @@ main() {
     "journalctl -u cloudflared -n 50 --no-pager 2>/dev/null | grep -c 'Connection registered' || echo 0" \
     2>/dev/null || echo 0)"
 
-  if [ "$_cf_running" = "active" ] && [ "${_cf_connected:-0}" -gt 0 ]; then
-    ok "VM already configured (cloudflared active + tunnel connected) — skipping remote setup."
+  if [ "$_cf_running" = "active" ] && [ "${_cf_connected:-0}" -gt 0 ] && [ -z "$VM_TUNNEL_TOKEN" ]; then
+    ok "VM already configured (cloudflared active + connected) — skipping full setup."
+    ok "No token provided — skipping step 8b."
+  elif [ "$_cf_running" = "active" ] && [ "${_cf_connected:-0}" -gt 0 ] && [ -n "$VM_TUNNEL_TOKEN" ]; then
+    ok "VM already configured — re-running step 8b (new token provided)."
+    section "Step 8b — Reinstall cloudflared tunnel token"
+    ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_SSH_USER}@${VM_SSH_HOST}" \
+      "VM_TUNNEL_TOKEN='${VM_TUNNEL_TOKEN}' VM_TUNNEL_HOST='${VM_TUNNEL_HOST}' \
+       VM_TUNNEL_NAME='${VM_TUNNEL_NAME}' sudo -E bash -s" <<'STEP8B'
+cloudflared service uninstall 2>/dev/null || true
+cloudflared service install "$VM_TUNNEL_TOKEN"
+systemctl enable --now cloudflared || true
+echo "  [OK]  Tunnel token reinstalled → systemctl status cloudflared"
+STEP8B
   else
-    [ "$_cf_running" = "active" ] && info "cloudflared active but tunnel not connected — re-running step 8."
+    [ "$_cf_running" = "active" ] && info "cloudflared active but tunnel not connected — re-running full setup."
     run_remote_setup
   fi
 
