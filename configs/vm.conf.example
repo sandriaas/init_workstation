@@ -1,5 +1,6 @@
-# Generated/used by scripts/phase2.sh
-# Edit values manually or let phase2.sh rewrite this file from prompts.
+# vm.conf.example — reference defaults for configs/vm.conf
+# Copy to configs/vm.conf and adjust, or let phase2.sh generate it.
+# configs/vm.conf is gitignored (runtime-generated).
 
 VM_NAME="server-vm"
 VM_HOSTNAME="ubuntu-server"

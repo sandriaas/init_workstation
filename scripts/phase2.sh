@@ -240,12 +240,26 @@ prompt_iso() {
   echo "  3) Enter a custom destination path"
   ask "Choice [1/2/3]: "; read -r ISO_CHOICE
 
+  _download_iso() {
+    local dest="$1"
+    info "Downloading Ubuntu ISO to $dest"
+    info "(supports resume — safe to Ctrl+C and rerun)"
+    # Try wget first (handles redirects + resume cleanly), fall back to curl
+    if command -v wget &>/dev/null; then
+      wget --continue --show-progress --tries=5 --timeout=30 \
+           -O "$dest" "$VM_ISO_URL"
+    else
+      curl -L --retry 5 --retry-delay 5 --retry-connrefused \
+           -C - --progress-bar \
+           -o "$dest" "$VM_ISO_URL"
+    fi
+  }
+
   case "${ISO_CHOICE:-1}" in
     1)
       VM_ISO_PATH="$VM_ISO_PATH_DEFAULT"
       if [ ! -f "$VM_ISO_PATH" ]; then
-        info "Downloading Ubuntu ISO to $VM_ISO_PATH"
-        curl -fL "$VM_ISO_URL" -o "$VM_ISO_PATH"
+        _download_iso "$VM_ISO_PATH"
       else
         ok "ISO already exists: $VM_ISO_PATH"
       fi
@@ -257,8 +271,7 @@ prompt_iso() {
     3)
       ask "Destination ISO path: "; read -r VM_ISO_PATH
       if [ ! -f "$VM_ISO_PATH" ]; then
-        info "Downloading Ubuntu ISO to $VM_ISO_PATH"
-        curl -fL "$VM_ISO_URL" -o "$VM_ISO_PATH"
+        _download_iso "$VM_ISO_PATH"
       fi
       ;;
     *)
