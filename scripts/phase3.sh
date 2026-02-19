@@ -16,8 +16,10 @@ confirm() { ask "$1 [Y/n]: "; read -r r; [[ "${r:-Y}" =~ ^[Yy]$ ]]; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VM_CONF_DIR="${REPO_DIR}/generated-vm"
-# Auto-detect generated conf
-VM_CONF="$(ls "${VM_CONF_DIR}"/*.conf 2>/dev/null | head -1 || echo "${VM_CONF_DIR}/server-vm.conf")"
+# Load last used conf from state file, then fall back to first *.conf
+_STATE="${VM_CONF_DIR}/.state"
+[ -f "$_STATE" ] && source "$_STATE" 2>/dev/null || true
+VM_CONF="${LAST_VM_CONF:-$(ls "${VM_CONF_DIR}"/*.conf 2>/dev/null | head -1 || echo "${VM_CONF_DIR}/server-vm.conf")}"
 
 [ -f "$VM_CONF" ] || { echo "Missing ${VM_CONF}. Run scripts/phase2.sh first."; exit 1; }
 # shellcheck disable=SC1090
@@ -201,6 +203,9 @@ main() {
   prompt_target
   run_remote_setup
   update_vm_conf
+  # Update state: mark phase3 done
+  local state="${VM_CONF_DIR}/.state"
+  [ -f "$state" ] && sed -i 's/PHASE3_DONE=.*/PHASE3_DONE="yes"/' "$state" || true
   print_summary
 }
 

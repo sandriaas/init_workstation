@@ -183,6 +183,38 @@ systemctl status cloudflared        # → active (running)
 
 ---
 
+## Network Architecture
+
+```
+Internet / Phone / Laptop
+         │
+         │  SSH via Cloudflare Tunnel
+         ▼
+┌─────────────────────────────────────┐
+│  Host Machine  192.168.110.90       │  ← Physical LAN (your router)
+│  CachyOS / Arch                     │
+│                                     │
+│  cloudflared ──► b8sqa0n0v48o       │  ← Host tunnel (phase 1)
+│  .easyrentbali.com                  │
+│                                     │
+│  virbr0 NAT  192.168.122.1          │  ← libvirt internal bridge
+│       │                             │     completely separate from LAN
+│       ▼                             │
+│  ┌──────────────────────┐           │
+│  │  VM  192.168.122.50  │           │
+│  │  Ubuntu Server       │           │
+│  │                      │           │
+│  │  cloudflared ──────► │           │  ← VM tunnel (phase 3)
+│  │  vm-xxxx.easyrent..  │           │
+│  └──────────────────────┘           │
+└─────────────────────────────────────┘
+```
+
+> **Why two separate IPs?**  
+> The VM (`192.168.122.x`) lives on libvirt's private NAT bridge — it has no direct LAN presence.  
+> External SSH access always goes through the VM's Cloudflare tunnel, so the VM never needs a LAN IP.  
+> The host IP (`192.168.110.90`) is only used for local management.
+
 ## Phase 2/3 — VM Provision + VM Setup
 
 Use these scripts in order:

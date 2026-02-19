@@ -283,7 +283,21 @@ else
   flag "VM_TUNNEL_HOST not configured — run phase2+phase3"
 fi
 
-# ─── Summary ─────────────────────────────────────────────────────────────────
+# ─── Phase State ─────────────────────────────────────────────────────────────
+section "Phase Progress"
+STATE_FILE="${REPO_DIR}/generated-vm/.state"
+if [ -f "$STATE_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$STATE_FILE" 2>/dev/null || true
+  [ "${PHASE1_DONE:-no}" = "yes" ] && pass "Phase 1 complete" || flag "Phase 1 not complete — run scripts/phase1.sh"
+  [ "${PHASE2_DONE:-no}" = "yes" ] && pass "Phase 2 complete  (last VM: ${LAST_VM_NAME:-unknown})" || flag "Phase 2 not complete — run scripts/phase2.sh"
+  [ "${PHASE3_DONE:-no}" = "yes" ] && pass "Phase 3 complete" || flag "Phase 3 not complete — run scripts/phase3.sh"
+  [ -n "${LAST_VM_CONF:-}" ] && info "Last vm.conf: ${LAST_VM_CONF}"
+else
+  flag "No state file found — run scripts/phase1.sh first"
+fi
+
+
 section "Summary"
 TOTAL=$((PASS+WARN+FAIL))
 echo -e "  ${GREEN}✓ ${PASS} passed${RESET}   ${YELLOW}! ${WARN} warnings${RESET}   ${RED}✗ ${FAIL} failed${RESET}   (${TOTAL} checks)"
