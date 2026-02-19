@@ -216,7 +216,7 @@ _resolve_vm_ip() {
     echo "${VM_STATIC_IP%/*}"; return
   fi
   local dhcp; dhcp="$(virsh domifaddr "$VM_NAME" 2>/dev/null \
-    | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)"
+    | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1 || true)"
   echo "${dhcp:-${VM_STATIC_IP%/*}}"
 }
 

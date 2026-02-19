@@ -181,12 +181,12 @@ detect_host_tunnel() {
     local key="$1"; shift
     grep -h "${key}:" "$@" 2>/dev/null \
       | awk -v k="${key}:" '{for(i=1;i<=NF;i++) if($i==k){print $(i+1); exit}}' \
-      | head -1
+      | head -1 || true
   }
   # hostname lines use $NF (last field) because value has no sub-keys after it
   _cf_hostname() {
     grep -h "hostname:" "$@" 2>/dev/null \
-      | awk '{v=$NF} v!="" && v!~/^\*/ {print v; exit}'
+      | awk '{v=$NF} v!="" && v!~/^\*/ {print v; exit}' || true
   }
 
   local cfg
@@ -302,7 +302,7 @@ prompt_iso() {
 
   _iso_sha256_expected() {
     curl -fsSL "$VM_ISO_SHA256_URL" 2>/dev/null \
-      | grep "$(basename "$VM_ISO_URL")" | awk '{print $1}' | head -1
+      | grep "$(basename "$VM_ISO_URL")" | awk '{print $1}' | head -1 || true
   }
 
   _verify_iso() {
@@ -585,7 +585,7 @@ prompt_tunnel() {
 
   echo ""
   VM_TUNNEL_NAME_DEFAULT="${VM_NAME}-ssh"
-  VM_TUNNEL_HOST_DEFAULT="vm-$(tr -dc a-z0-9 </dev/urandom | head -c 8).${HOST_TUNNEL_DOMAIN}"
+  VM_TUNNEL_HOST_DEFAULT="vm-$(tr -dc a-z0-9 </dev/urandom | head -c 8 || true).${HOST_TUNNEL_DOMAIN}"
   echo -e "  VM tunnel will be a ${YELLOW}new${RESET} tunnel on the same domain."
   ask "VM tunnel name [${VM_TUNNEL_NAME_DEFAULT}]: "; read -r VM_TUNNEL_NAME
   ask "VM tunnel hostname [${VM_TUNNEL_HOST_DEFAULT}]: "; read -r VM_TUNNEL_HOST
@@ -1177,9 +1177,9 @@ select_or_create_conf() {
     local nm; nm="$(basename "$f" .conf)"
     # Peek at key fields from the conf
     local _vcpus _ram _ip
-    _vcpus="$(grep -m1 "^VM_VCPUS=" "$f" 2>/dev/null | cut -d= -f2 | tr -d '"')"
-    _ram="$(grep -m1 "^VM_RAM_MB=" "$f" 2>/dev/null | cut -d= -f2 | tr -d '"')"
-    _ip="$(grep -m1 "^VM_STATIC_IP=" "$f" 2>/dev/null | cut -d= -f2 | tr -d '"' | cut -d/ -f1)"
+    _vcpus="$(grep -m1 "^VM_VCPUS=" "$f" 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
+    _ram="$(grep -m1 "^VM_RAM_MB=" "$f" 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
+    _ip="$(grep -m1 "^VM_STATIC_IP=" "$f" 2>/dev/null | cut -d= -f2 | tr -d '"' | cut -d/ -f1 || true)"
     local details=""
     [ -n "${_vcpus}" ] && details="${_vcpus}vCPU"
     [ -n "${_ram}" ] && details="${details:+${details} / }$(( ${_ram} / 1024 ))GB RAM"

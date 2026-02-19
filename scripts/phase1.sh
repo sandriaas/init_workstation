@@ -310,7 +310,7 @@ step_static_ip() {
 
   # Skip if already static via NetworkManager
   if command -v nmcli &>/dev/null; then
-    NM_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep "$IFACE" | cut -d: -f1 | head -1)
+    NM_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep "$IFACE" | cut -d: -f1 | head -1 || true)
     NM_METHOD=$(nmcli con show "$NM_CON" 2>/dev/null | awk '/ipv4.method/{print $2}')
     if [ "$NM_METHOD" = "manual" ]; then
       ok "Static IP already set on '$NM_CON'. Skipping."; return
@@ -423,7 +423,7 @@ step_cloudflare_tunnel() {
   info "Creating tunnel '$TUNNEL_NAME'..."
   TUNNEL_OUTPUT=$(sudo -u "$CURRENT_USER" cloudflared tunnel create "$TUNNEL_NAME" 2>&1)
   echo "$TUNNEL_OUTPUT"
-  TUNNEL_ID=$(echo "$TUNNEL_OUTPUT" | grep -oP '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+  TUNNEL_ID=$(echo "$TUNNEL_OUTPUT" | grep -oP '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1 || true)
 
   if [ -z "$TUNNEL_ID" ]; then
     warn "Could not parse tunnel ID — check output above."; return
