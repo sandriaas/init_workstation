@@ -943,6 +943,7 @@ create_vm() {
 
     # Machine type must be pc (i440fx) for legacy IGD passthrough — NOT q35
     # --location extracts kernel/initrd from ISO for extra-args injection
+    # --noautoconsole: subiquity autoinstall is always silent on serial console
     # shellcheck disable=SC2086
     if ! sudo virt-install \
       --name "$VM_NAME" \
@@ -959,7 +960,8 @@ create_vm() {
       --console "${VM_CONSOLE:-pty,target_type=serial}" \
       --location "${iso_path},kernel=casper/vmlinuz,initrd=casper/initrd" \
       ${seed_disk_arg} \
-      ${extra_args:+--extra-args "$extra_args"}; then
+      ${extra_args:+--extra-args "$extra_args"} \
+      --noautoconsole; then
       err "virt-install failed! Check the error above."
       err "Common fixes: missing OVMF firmware, invalid ISO path, or libvirtd not running."
       err "  ISO path:   ${iso_path}"
@@ -972,8 +974,9 @@ create_vm() {
     fi
 
     if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-      info "Ubuntu autoinstall complete. VM rebooted — continuing setup."
-      info "Phase 3 will verify SSH connectivity."
+      ok "VM created. Ubuntu autoinstall running silently in background (~10-15 min)."
+      info "Subiquity (Ubuntu installer) does not output to serial — this is normal."
+      info "SSH poll below will detect completion automatically."
     else
       ok "VM created. Complete Ubuntu installer via: sudo virsh console ${VM_NAME}"
     fi
