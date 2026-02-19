@@ -1466,11 +1466,29 @@ main() {
     if [ "$_early_state" = "running" ] && \
        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes \
            "${VM_USER}@${_check_ip}" true 2>/dev/null; then
-      ok "VM SSH reachable at ${VM_USER}@${_check_ip} — skipping install."
+      ok "VM SSH reachable at ${VM_USER}@${_check_ip}"
       VM_SSH_RESULT="✓  ${VM_USER}@${_check_ip}"
       VM_SSH_IP="$_check_ip"
-      print_summary
-      exit 0
+      echo ""
+      echo "  1) Show summary + exit  (VM already running)"
+      echo "  2) Run provisioning     (re-apply cloud-init / SSH config)"
+      echo "  3) Destroy + recreate   (fresh install from scratch)"
+      ask "Choice [1/2/3, default=1]: "; read -r _exist_choice
+      case "${_exist_choice:-1}" in
+        2) info "Re-running provisioning on existing VM..." ;;
+        3)
+          info "Destroying ${VM_NAME}..."
+          sudo virsh destroy "$VM_NAME" 2>/dev/null || true
+          sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null \
+            || sudo virsh undefine "$VM_NAME" 2>/dev/null || true
+          sudo rm -f "${VM_DISK_PATH}" "/var/lib/libvirt/images/${VM_NAME}-seed.iso" 2>/dev/null || true
+          ok "VM destroyed. Proceeding with fresh install."
+          ;;
+        *)
+          print_summary
+          exit 0
+          ;;
+      esac
     else
       warn "VM exists but SSH not reachable (state: ${_early_state}, ip: ${_check_ip})."
       echo ""
