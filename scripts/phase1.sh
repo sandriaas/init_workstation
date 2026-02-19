@@ -598,7 +598,7 @@ EOF
   fi
   ok "GPU config saved to vm.conf"
 
-  # Install i915-sriov-dkms on host
+  # 1. Install i915-sriov-dkms (module must exist before kernel args reference it)
   info "Installing i915-sriov-dkms on host..."
   case "$OS" in
     arch)
@@ -611,7 +611,7 @@ EOF
     fedora)
       sudo dnf -y copr enable matte23/akmods || warn "Could not enable COPR"
       sudo dnf install -y akmod-i915-sriov || warn "Could not install akmod-i915-sriov"
-      sudo akmods --force || true; sudo depmod -a || true; sudo dracut --force || true
+      sudo akmods --force || true; sudo depmod -a || true
       ;;
     ubuntu|proxmox)
       if ! dpkg -s i915-sriov-dkms >/dev/null 2>&1; then
@@ -627,8 +627,31 @@ EOF
       ;;
   esac
 
-  # Patch kernel args for SR-IOV
-  FULL_KERNEL_ARGS="intel_iommu=on iommu=pt ${KERNEL_GPU_ARGS}"
+  # 2. Load vfio-pci + udev rule to bind VFs at boot
+  echo "vfio-pci" | sudo tee /etc/modules-load.d/vfio.conf >/dev/null
+  DEVICE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//' || echo "a7a0")"
+  sudo tee /etc/udev/rules.d/99-i915-vf-vfio.rules >/dev/null <<EOF
+ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:00:02.[1-7]", ATTR{vendor}=="0x8086", ATTR{device}=="0x${DEVICE_ID}", DRIVER!="vfio-pci", RUN+="/bin/sh -c 'echo \$kernel > /sys/bus/pci/devices/\$kernel/driver/unbind; echo vfio-pci > /sys/bus/pci/devices/\$kernel/driver_override; modprobe vfio-pci; echo \$kernel > /sys/bus/pci/drivers/vfio-pci/bind'"
+EOF
+
+  # 3. Enable VF creation at boot via sysfs/tmpfiles
+  if [ -f /etc/tmpfiles.d/i915-set-sriov-numvfs.conf ]; then
+    sudo sed -i "s|^#*w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs.*|w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs - - - - ${GPU_VF_COUNT}|" \
+      /etc/tmpfiles.d/i915-set-sriov-numvfs.conf
+  else
+    if ! grep -q "sriov_numvfs" /etc/sysfs.conf 2>/dev/null; then
+      echo "devices/pci0000:00/0000:00:02.0/sriov_numvfs = ${GPU_VF_COUNT}" | sudo tee -a /etc/sysfs.conf >/dev/null
+    fi
+  fi
+
+  # 4. Rebuild initramfs (includes new dkms module + vfio)
+  case "$OS" in
+    arch)           sudo mkinitcpio -P || true ;;
+    ubuntu|proxmox) sudo update-initramfs -u || true ;;
+    fedora)         sudo dracut --force || true ;;
+  esac
+
+  # 5. Patch kernel args + regenerate bootloader (after initramfs is ready)
   if [ -f /etc/default/limine ]; then
     if ! grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/limine 2>/dev/null; then
       sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${KERNEL_GPU_ARGS}\"/g" /etc/default/limine
@@ -646,29 +669,6 @@ EOF
     esac
     ok "GRUB updated with SR-IOV args."
   fi
-
-  # Enable VF creation at boot
-  if [ -f /etc/tmpfiles.d/i915-set-sriov-numvfs.conf ]; then
-    sudo sed -i "s|^#*w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs.*|w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs - - - - ${GPU_VF_COUNT}|" \
-      /etc/tmpfiles.d/i915-set-sriov-numvfs.conf
-  else
-    if ! grep -q "sriov_numvfs" /etc/sysfs.conf 2>/dev/null; then
-      echo "devices/pci0000:00/0000:00:02.0/sriov_numvfs = ${GPU_VF_COUNT}" | sudo tee -a /etc/sysfs.conf >/dev/null
-    fi
-  fi
-
-  # Load vfio-pci + udev rule to bind VFs
-  echo "vfio-pci" | sudo tee /etc/modules-load.d/vfio.conf >/dev/null
-  DEVICE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//' || echo "a7a0")"
-  sudo tee /etc/udev/rules.d/99-i915-vf-vfio.rules >/dev/null <<EOF
-ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:00:02.[1-7]", ATTR{vendor}=="0x8086", ATTR{device}=="0x${DEVICE_ID}", DRIVER!="vfio-pci", RUN+="/bin/sh -c 'echo \$kernel > /sys/bus/pci/devices/\$kernel/driver/unbind; echo vfio-pci > /sys/bus/pci/devices/\$kernel/driver_override; modprobe vfio-pci; echo \$kernel > /sys/bus/pci/drivers/vfio-pci/bind'"
-EOF
-
-  case "$OS" in
-    arch)           sudo mkinitcpio -P || true ;;
-    ubuntu|proxmox) sudo update-initramfs -u || true ;;
-    fedora)         sudo dracut --force || true ;;
-  esac
 
   ok "SR-IOV host setup done. VFs will be active after reboot."
 }
