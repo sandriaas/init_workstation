@@ -821,7 +821,9 @@ EOF
 
 # Generate cloud-init user-data (autoinstall format) + empty meta-data
 # Written to ${VM_CONF_DIR}/${VM_NAME}-seed/user-data
+# Optional arg $1: SSH public key to inject (for Packer SSH communicator)
 generate_autoinstall() {
+  local packer_pubkey="${1:-}"
   source_vm_conf
   local seed_dir="${VM_CONF_DIR}/${VM_NAME}-seed"
   mkdir -p "$seed_dir"
@@ -854,7 +856,12 @@ generate_autoinstall() {
     printf '  ssh:\n'
     printf '    install-server: true\n'
     printf '    allow-pw: true\n'
-    printf '    authorized-keys: []\n'
+    if [ -n "$packer_pubkey" ]; then
+      printf '    authorized-keys:\n'
+      printf '      - "%s"\n' "$packer_pubkey"
+    else
+      printf '    authorized-keys: []\n'
+    fi
     printf '  storage:\n'
     printf '    layout:\n'
     printf '      name: lvm\n'
@@ -914,114 +921,82 @@ create_vm() {
   sudo virsh net-autostart default >/dev/null 2>&1 || true
   sudo virsh net-start default >/dev/null 2>&1 || true
 
-  # ── Ensure ISOs are readable by libvirt-qemu ──────────────────────────────
-  # libvirt-qemu needs execute on every directory in the path and read on files.
-  # Safest fix: copy ISOs under /var/lib/libvirt/images/ which is always accessible.
-  _ensure_libvirt_readable() {
-    local src="$1"
-    [ -f "$src" ] || return 0
-    # Already under a libvirt-accessible path — return as-is
-    if echo "$src" | grep -qE "^/var/lib/libvirt|^/tmp|^/root"; then
-      echo "$src"; return 0
-    fi
-    local dest="/var/lib/libvirt/images/$(basename "$src")"
-    if [ ! -f "$dest" ]; then
-      # Print to stderr so it doesn't pollute the $() capture
-      info "Copying $(basename "$src") → ${dest}  (libvirt-qemu needs access)" >&2
-      sudo cp "$src" "$dest"
-      sudo chmod 644 "$dest"
-    fi
-    echo "$dest"
-  }
-
-  local iso_path
-  iso_path="$(_ensure_libvirt_readable "$VM_ISO_PATH")"
-  [ -z "$iso_path" ] && iso_path="$VM_ISO_PATH"
-
   if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-    ok "VM '${VM_NAME}' already exists. Skipping virt-install."
+    ok "VM '${VM_NAME}' already exists. Skipping build."
   else
-    # ── Generate autoinstall user-data and serve via HTTP ─────────────────────
-    # Official Canonical method: serve user-data over HTTP from host.
-    # The VM reaches the host via the libvirt bridge gateway (192.168.122.1).
-    # --cloud-init with --location is bugged on non-Ubuntu virt-install builds
-    # (Launchpad #2073461) — HTTP avoids that entirely.
-    local http_pid="" http_port=3003 http_log=""
-    if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-      generate_autoinstall
-      local seed_dir="${VM_CONF_DIR}/${VM_NAME}-seed"
-      # Pick a free port
-      while ss -tlnp 2>/dev/null | grep -q ":${http_port} "; do
-        (( http_port++ )) || true
-      done
-      # Host-specific fix: UFW INPUT policy DROP blocks libvirt DHCP/DNS by default.
-      # Allow DHCP/DNS + cloud-init HTTP from VM network (virbr0) during install.
-      sudo iptables -I INPUT -i virbr0 -p udp --dport 67 -j ACCEPT 2>/dev/null || true
-      sudo iptables -I INPUT -i virbr0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-      sudo iptables -I INPUT -i virbr0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-      sudo iptables -I INPUT -i virbr0 -p tcp --dport "$http_port" -j ACCEPT 2>/dev/null || true
-      http_log="/tmp/${VM_NAME}-cloudinit-http.log"
-      python3 -m http.server "$http_port" --directory "$seed_dir" \
-        --bind 192.168.122.1 >"$http_log" 2>&1 &
-      http_pid=$!
-      info "Serving cloud-init data at http://192.168.122.1:${http_port}/ (pid ${http_pid})"
-      info "cloud-init HTTP log: ${http_log}"
-      info "Ubuntu autoinstall enabled — installation will run unattended (~10-15 min)"
+    local seed_dir="${VM_CONF_DIR}/${VM_NAME}-seed"
+    local packer_key_dir="/tmp/packer-keys-${VM_NAME}"
+    local packer_ovmf_vars="/tmp/packer-ovmf-vars-${VM_NAME}.fd"
+    local packer_output_dir="/tmp/packer-output-${VM_NAME}"
+    local packer_tpl="${REPO_DIR}/packer/ubuntu.pkr.hcl"
+
+    # ── Temp SSH keypair for Packer communicator ───────────────────────────
+    rm -rf "$packer_key_dir"; mkdir -p "$packer_key_dir"
+    ssh-keygen -t ed25519 -N "" -f "${packer_key_dir}/packer_key" -C "packer@build" -q
+    chmod 600 "${packer_key_dir}/packer_key"
+    local packer_pubkey; packer_pubkey="$(cat "${packer_key_dir}/packer_key.pub")"
+
+    # ── Generate autoinstall user-data with packer pubkey injected ─────────
+    generate_autoinstall "$packer_pubkey"
+
+    # ── Writable OVMF VARS copy (packer needs a per-build writable NVRAM) ─
+    cp "/usr/share/edk2/x64/OVMF_VARS.4m.fd" "$packer_ovmf_vars"
+
+    # ── Packer plugin init (run as original user to use their plugin cache) ─
+    rm -rf "$packer_output_dir"
+    info "Initialising Packer plugins..."
+    sudo -u "$CURRENT_USER" packer init "${packer_tpl}" 2>&1 | grep -v "^$" || true
+
+    # ── Packer build (streams output; ~15-20 min for Ubuntu autoinstall) ───
+    info "Starting Packer build (~15-20 min)..."
+    info "Serial console log: /tmp/packer-${VM_NAME}-serial.log"
+    if ! sudo -u "$CURRENT_USER" packer build \
+      -var "vm_name=${VM_NAME}" \
+      -var "vm_ram_mb=${VM_RAM_MB}" \
+      -var "vm_vcpus=${VM_VCPUS}" \
+      -var "vm_disk_gb=${VM_DISK_GB}" \
+      -var "vm_iso_path=${VM_ISO_PATH}" \
+      -var "vm_user=${VM_USER}" \
+      -var "vm_ssh_port=${VM_SSH_PORT:-22}" \
+      -var "seed_dir=${seed_dir}" \
+      -var "output_dir=${packer_output_dir}" \
+      -var "ssh_private_key_file=${packer_key_dir}/packer_key" \
+      -var "ovmf_vars=${packer_ovmf_vars}" \
+      "${packer_tpl}"; then
+      err "Packer build failed! Serial log: /tmp/packer-${VM_NAME}-serial.log"
+      rm -rf "$packer_key_dir" "$packer_ovmf_vars" "$packer_output_dir"
+      return 1
     fi
 
-    # Machine type must be pc (i440fx) for legacy IGD passthrough — NOT q35
-    # --location extracts kernel/initrd from ISO for extra-args injection
-    # ds=nocloud-net: cloud-init fetches user-data/meta-data via HTTP from host gateway
-    # _gateway resolves to default route inside the installer (192.168.122.1)
-    local extra_args="autoinstall"
-    [ "${VM_AUTOINSTALL:-yes}" = "yes" ] && extra_args="autoinstall ds=nocloud-net;s=http://192.168.122.1:${http_port}/"
+    # ── Move built image to VM_DISK_PATH ──────────────────────────────────
+    sudo mkdir -p "$(dirname "$VM_DISK_PATH")"
+    sudo mv "${packer_output_dir}/${VM_NAME}.qcow2" "$VM_DISK_PATH"
+    sudo chmod 644 "$VM_DISK_PATH"
+    rm -rf "$packer_key_dir" "$packer_ovmf_vars" "$packer_output_dir"
+    ok "Packer build complete → ${VM_DISK_PATH}"
 
+    # ── Import pre-built image into libvirt ───────────────────────────────
+    info "Importing VM into libvirt..."
     if ! sudo virt-install \
       --name "$VM_NAME" \
       --memory "$VM_RAM_MB" \
       --vcpus "$VM_VCPUS" \
       --cpu "${VM_CPU_MODEL:-host-passthrough}" \
       --machine "${VM_MACHINE_TYPE:-pc}" \
-      --boot "${VM_FIRMWARE:-uefi}" \
-      --disk "path=${VM_DISK_PATH},size=${VM_DISK_GB},format=${VM_DISK_FORMAT:-qcow2},bus=${VM_DISK_BUS:-virtio}" \
+      --boot uefi \
+      --disk "path=${VM_DISK_PATH},format=${VM_DISK_FORMAT:-qcow2},bus=${VM_DISK_BUS:-virtio}" \
       --os-variant "$VM_OS_VARIANT" \
       --network "network=${VM_NET_SOURCE:-default},model=${VM_NET_MODEL:-virtio}" \
       --graphics "${VM_GRAPHICS:-none}" \
       --video "${VM_VIDEO:-none}" \
       --console "${VM_CONSOLE:-pty,target_type=serial}" \
-      --location "${iso_path},kernel=casper/vmlinuz,initrd=casper/initrd" \
-      --extra-args "$extra_args" \
+      --import \
       --noautoconsole; then
-      err "virt-install failed! Check the error above."
-      err "Common fixes: missing OVMF firmware, invalid ISO path, or libvirtd not running."
-      err "  ISO path:   ${iso_path}"
-      err "  Disk path:  ${VM_DISK_PATH}"
-      err "  VM name:    ${VM_NAME}"
-      [ -n "$http_pid" ] && kill "$http_pid" 2>/dev/null || true
-      [ -f "$VM_DISK_PATH" ] && sudo rm -f "$VM_DISK_PATH" && warn "Removed partial disk: ${VM_DISK_PATH}"
-      sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || sudo virsh undefine "$VM_NAME" 2>/dev/null || true
+      err "virt-install --import failed!"
+      err "  Disk path: ${VM_DISK_PATH}"
       return 1
     fi
-
-    # Keep HTTP server up for 5 min — UEFI boot + initramfs takes ~2-3 min before cloud-init runs
-    if [ -n "$http_pid" ]; then
-      info "Waiting for cloud-init to fetch autoinstall data (up to 5 min)..."
-      sleep 300
-      kill "$http_pid" 2>/dev/null || true
-      sudo iptables -D INPUT -i virbr0 -p tcp --dport "$http_port" -j ACCEPT 2>/dev/null || true
-      sudo iptables -D INPUT -i virbr0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-      sudo iptables -D INPUT -i virbr0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-      sudo iptables -D INPUT -i virbr0 -p udp --dport 67 -j ACCEPT 2>/dev/null || true
-      info "cloud-init HTTP server stopped, firewall rule removed."
-    fi
-
-    if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
-      ok "VM created. Ubuntu autoinstall running silently in background (~10-15 min)."
-      info "Subiquity (Ubuntu installer) does not output to serial — this is normal."
-      info "SSH poll below will detect completion automatically."
-    else
-      ok "VM created. Complete Ubuntu installer via: sudo virsh console ${VM_NAME}"
-    fi
+    ok "VM '${VM_NAME}' imported and started."
   fi
 
   # ── virtiofs shared storage ────────────────────────────────────────────────
