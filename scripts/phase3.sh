@@ -25,6 +25,39 @@ VM_CONF="${LAST_VM_CONF:-$(ls "${VM_CONF_DIR}"/*.conf 2>/dev/null | head -1 || e
 # shellcheck disable=SC1090
 source "$VM_CONF"
 
+# Snapper snapshot helper
+SNAP_PRE_NUM=""
+_snap_pre() {
+  local desc="$1"
+  if command -v snapper &>/dev/null && snapper list-configs 2>/dev/null | grep -q "^root"; then
+    SNAP_PRE_NUM="$(snapper -c root create --type pre --cleanup-algorithm number \
+      --print-number --description "$desc" 2>/dev/null || true)"
+    [ -n "$SNAP_PRE_NUM" ] && ok "Snapper pre-snapshot #${SNAP_PRE_NUM}: ${desc}" \
+                           || warn "Snapper available but snapshot failed"
+  fi
+}
+_snap_post() {
+  local desc="$1"
+  if command -v snapper &>/dev/null && [ -n "${SNAP_PRE_NUM:-}" ]; then
+    local post_num
+    post_num="$(snapper -c root create --type post --pre-number "$SNAP_PRE_NUM" \
+      --cleanup-algorithm number --print-number --description "$desc" 2>/dev/null || true)"
+    [ -n "$post_num" ] && ok "Snapper post-snapshot #${post_num} (paired with #${SNAP_PRE_NUM})" \
+                       || warn "Snapper post-snapshot failed"
+    SNAP_POST_NUM="$post_num"
+  fi
+}
+_snap_summary() {
+  if [ -n "${SNAP_PRE_NUM:-}" ]; then
+    echo -e "${BOLD}  ── Snapshots ────────────────────────────────────────────────${RESET}"
+    echo "  Pre  : #${SNAP_PRE_NUM}"
+    [ -n "${SNAP_POST_NUM:-}" ] && echo "  Post : #${SNAP_POST_NUM}"
+    echo "  View : snapper list"
+    echo "  Undo : snapper undochange ${SNAP_PRE_NUM}..${SNAP_POST_NUM:-${SNAP_PRE_NUM}}"
+    echo ""
+  fi
+}
+
 VM_STATIC_IP_ADDR="${VM_STATIC_IP%/*}"
 VM_SSH_HOST="$VM_STATIC_IP_ADDR"
 VM_SSH_USER="${VM_USER}"
@@ -191,6 +224,7 @@ print_summary() {
   echo "Client setup command:"
   echo "  bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase2-client.sh)"
   echo ""
+  _snap_summary
 }
 
 main() {
@@ -200,12 +234,14 @@ main() {
   echo "╚══════════════════════════════════════════════╝"
   echo -e "${RESET}"
   confirm "Proceed with VM internal setup now?" || exit 0
+  _snap_pre "phase3 vm internal setup start"
   prompt_target
   run_remote_setup
   update_vm_conf
   # Update state: mark phase3 done
   local state="${VM_CONF_DIR}/.state"
   [ -f "$state" ] && sed -i 's/PHASE3_DONE=.*/PHASE3_DONE="yes"/' "$state" || true
+  _snap_post "phase3 vm internal setup complete"
   print_summary
 }
 

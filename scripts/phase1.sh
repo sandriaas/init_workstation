@@ -824,11 +824,45 @@ EOF
   else
     sed -i 's/PHASE1_DONE=.*/PHASE1_DONE="yes"/' "$state"
   fi
+  _snap_summary
 }
 
 # =============================================================================
 # MAIN
 # =============================================================================
+# Snapper snapshot helper — creates pre/post pair if snapper+btrfs available
+SNAP_PRE_NUM=""
+_snap_pre() {
+  local desc="$1"
+  if command -v snapper &>/dev/null && snapper list-configs 2>/dev/null | grep -q "^root"; then
+    SNAP_PRE_NUM="$(snapper -c root create --type pre --cleanup-algorithm number \
+      --print-number --description "$desc" 2>/dev/null || true)"
+    [ -n "$SNAP_PRE_NUM" ] && ok "Snapper pre-snapshot #${SNAP_PRE_NUM}: ${desc}" \
+                           || warn "Snapper available but snapshot failed"
+  fi
+}
+_snap_post() {
+  local desc="$1"
+  if command -v snapper &>/dev/null && [ -n "${SNAP_PRE_NUM:-}" ]; then
+    local post_num
+    post_num="$(snapper -c root create --type post --pre-number "$SNAP_PRE_NUM" \
+      --cleanup-algorithm number --print-number --description "$desc" 2>/dev/null || true)"
+    [ -n "$post_num" ] && ok "Snapper post-snapshot #${post_num} (paired with #${SNAP_PRE_NUM})" \
+                       || warn "Snapper post-snapshot failed"
+    SNAP_POST_NUM="$post_num"
+  fi
+}
+_snap_summary() {
+  if [ -n "${SNAP_PRE_NUM:-}" ]; then
+    echo -e "${BOLD}  ── Snapshots ────────────────────────────────────────────────${RESET}"
+    echo "  Pre  : #${SNAP_PRE_NUM}"
+    [ -n "${SNAP_POST_NUM:-}" ] && echo "  Post : #${SNAP_POST_NUM}"
+    echo "  View : snapper list"
+    echo "  Undo : snapper undochange ${SNAP_PRE_NUM}..${SNAP_POST_NUM:-${SNAP_PRE_NUM}}"
+    echo ""
+  fi
+}
+
 main() {
   echo -e "${BOLD}"
   echo "╔══════════════════════════════════════════════╗"
@@ -849,12 +883,14 @@ main() {
   info "Steps: packages → sleep → static IP → SSH → Cloudflare tunnel → iGPU SR-IOV+IOMMU"
   confirm "Proceed with Phase 1 setup?" || { echo "Aborted."; exit 0; }
 
+  _snap_pre "phase1 host setup start"
   step_packages
   step_sleep
   step_static_ip
   step_ssh
   step_cloudflare_tunnel
   step_sriov_host
+  _snap_post "phase1 host setup complete"
   print_final_summary
 }
 

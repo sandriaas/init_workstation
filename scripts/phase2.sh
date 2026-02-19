@@ -875,6 +875,40 @@ print_summary() {
   echo "  3. Verify with:"
   echo "       bash scripts/check.sh"
   echo ""
+  _snap_summary
+}
+
+# Snapper snapshot helper
+SNAP_PRE_NUM=""
+_snap_pre() {
+  local desc="$1"
+  if command -v snapper &>/dev/null && snapper list-configs 2>/dev/null | grep -q "^root"; then
+    SNAP_PRE_NUM="$(snapper -c root create --type pre --cleanup-algorithm number \
+      --print-number --description "$desc" 2>/dev/null || true)"
+    [ -n "$SNAP_PRE_NUM" ] && ok "Snapper pre-snapshot #${SNAP_PRE_NUM}: ${desc}" \
+                           || warn "Snapper available but snapshot failed"
+  fi
+}
+_snap_post() {
+  local desc="$1"
+  if command -v snapper &>/dev/null && [ -n "${SNAP_PRE_NUM:-}" ]; then
+    local post_num
+    post_num="$(snapper -c root create --type post --pre-number "$SNAP_PRE_NUM" \
+      --cleanup-algorithm number --print-number --description "$desc" 2>/dev/null || true)"
+    [ -n "$post_num" ] && ok "Snapper post-snapshot #${post_num} (paired with #${SNAP_PRE_NUM})" \
+                       || warn "Snapper post-snapshot failed"
+    SNAP_POST_NUM="$post_num"
+  fi
+}
+_snap_summary() {
+  if [ -n "${SNAP_PRE_NUM:-}" ]; then
+    echo -e "${BOLD}  ── Snapshots ────────────────────────────────────────────────${RESET}"
+    echo "  Pre  : #${SNAP_PRE_NUM}"
+    [ -n "${SNAP_POST_NUM:-}" ] && echo "  Post : #${SNAP_POST_NUM}"
+    echo "  View : snapper list"
+    echo "  Undo : snapper undochange ${SNAP_PRE_NUM}..${SNAP_POST_NUM:-${SNAP_PRE_NUM}}"
+    echo ""
+  fi
 }
 
 select_or_create_conf() {
@@ -934,6 +968,8 @@ main() {
   SKIP_PROMPTS="no"
   select_or_create_conf
 
+  _snap_pre "phase2 vm provision start"
+
   if [ "${SKIP_PROMPTS:-no}" = "no" ]; then
     prompt_resource_and_vm_basics
     prompt_disk_path
@@ -950,6 +986,7 @@ main() {
   install_sriov_host
   create_vm
   write_state
+  _snap_post "phase2 vm provision complete"
   print_summary
 }
 
