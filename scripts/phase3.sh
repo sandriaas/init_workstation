@@ -10,7 +10,7 @@
 #   4. Configure SSH (enable sshd, fail2ban, PasswordAuthentication)
 #   5. Set static IP via netplan
 #   6. Mount virtiofs shared folder
-#   7. Install i915-sriov-dkms in guest (required for SR-IOV VF inside VM)
+#   7. i915 guest driver check (host-only DKMS not needed in VM)
 #   8. Install cloudflared + set up Cloudflare tunnel
 # =============================================================================
 
@@ -323,7 +323,7 @@ wait_for_ssh() {
 # =============================================================================
 run_remote_setup() {
   section "Remote VM Configuration (${VM_SSH_USER}@${VM_SSH_HOST})"
-  info "Steps: packages → SSH config → static IP → shared folder → i915-sriov-dkms → cloudflared tunnel"
+  info "Steps: packages → SSH config → static IP → shared folder → i915 check → cloudflared tunnel"
   echo ""
 
   # Ensure VM has internet via libvirt NAT (UFW may block FORWARD)
@@ -423,24 +423,14 @@ if ! grep -q "${SHARED_TAG}" /etc/fstab; then
 fi
 mount -a || warn "virtiofs mount failed — will succeed after host reboot."
 
-# ── Step 7: i915-sriov-dkms in guest ───────────────────────────────────────
-step "Step 7: Install i915-sriov-dkms in guest"
-if command -v apt-get >/dev/null 2>&1; then
-  SRIOV_DEB_URL="$(curl -fsSL https://api.github.com/repos/strongtz/i915-sriov-dkms/releases/latest \
-    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(a["browser_download_url"] for a in d["assets"] if a["name"].endswith("_amd64.deb")))' 2>/dev/null || true)"
-  if [ -n "${SRIOV_DEB_URL:-}" ]; then
-    curl -fL "$SRIOV_DEB_URL" -o /tmp/i915-sriov-dkms.deb
-    dpkg -i /tmp/i915-sriov-dkms.deb || DEBIAN_FRONTEND=noninteractive apt-get install -f -y
-    ok "i915-sriov-dkms installed."
-  else
-    warn "Could not fetch i915-sriov-dkms .deb — install manually:"
-    warn "  https://github.com/strongtz/i915-sriov-dkms/releases"
-  fi
-elif command -v pacman >/dev/null 2>&1 && command -v paru >/dev/null 2>&1; then
-  paru -S --noconfirm --needed i915-sriov-dkms
-  ok "i915-sriov-dkms installed."
+# ── Step 7: i915 guest driver check ────────────────────────────────────────
+step "Step 7: i915 SR-IOV guest driver"
+# i915-sriov-dkms is HOST-only (creates VFs). VM uses built-in i915 driver.
+# Ubuntu 24.04 kernel 6.8+ handles SR-IOV VF passthrough natively.
+if lsmod 2>/dev/null | grep -q "^i915"; then
+  ok "i915 driver loaded — SR-IOV VF will work when attached."
 else
-  warn "Unsupported package manager — install i915-sriov-dkms manually."
+  warn "i915 not loaded — will load automatically when GPU VF is attached."
 fi
 
 # ── Step 8: cloudflared + tunnel ───────────────────────────────────────────
@@ -574,7 +564,7 @@ print_summary() {
   echo "  4. SSH configured         (sshd + fail2ban enabled, PasswordAuth yes)"
   echo "  5. Static IP set          (${VM_STATIC_IP} via ${VM_GATEWAY})"
   echo "  6. Shared folder mounted  (/mnt/${SHARED_TAG})"
-  echo "  7. i915-sriov-dkms        (installed in guest)"
+  echo "  7. i915 guest driver       (built-in, no DKMS needed in VM)"
   echo "  8. cloudflared            (host: ${HOST_TUNNEL_HOST} → VM: ${VM_TUNNEL_HOST})"
   echo ""
   echo -e "${BOLD}  ── VM Status ────────────────────────────────────────────────${RESET}"
