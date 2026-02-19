@@ -66,8 +66,11 @@ detect_system() {
     SYS_CPU_GEN="14th gen Raptor Lake Refresh"
   fi
 
-  SYS_VTXD="$(dmesg 2>/dev/null | grep -qiE 'DMAR|IOMMU.*enabled|iommu: enabling' \
-    && echo 'VT-d active ✓' || echo 'VT-d: set kernel args + BIOS')"
+  if ls /sys/class/iommu/ 2>/dev/null | grep -q .; then
+    SYS_VTXD="VT-d active ✓"
+  else
+    SYS_VTXD="VT-d: set kernel args + BIOS"
+  fi
 
   section "System Information"
   echo "  CPU     : ${SYS_CPU} ${SYS_CPU_GEN:+(${SYS_CPU_GEN})}"
@@ -122,11 +125,11 @@ check_requirements() {
     warn_count=$((warn_count+1))
   fi
 
-  # VT-d check
-  if dmesg 2>/dev/null | grep -qiE 'DMAR|IOMMU.*enabled|iommu: enabling'; then
+  # VT-d check via sysfs (works without root, unlike dmesg)
+  if ls /sys/class/iommu/ 2>/dev/null | grep -q .; then
     echo -e "  ${GREEN}✓${RESET} VT-d/IOMMU active"
   else
-    echo -e "  ${YELLOW}!${RESET} VT-d not confirmed in dmesg — BIOS: enable Intel VT-d"
+    echo -e "  ${YELLOW}!${RESET} VT-d not confirmed — BIOS: enable Intel VT-d"
     warn_count=$((warn_count+1))
   fi
 

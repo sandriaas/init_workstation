@@ -65,9 +65,11 @@ detect_system() {
     SYS_CPU_GEN="10th/11th gen (Ice/Tiger Lake)"
   fi
 
-  SYS_VTXD="$( dmesg 2>/dev/null | grep -qiE 'DMAR|IOMMU.*enabled|iommu: enabling' \
-    && echo 'VT-d detected in dmesg ✓' \
-    || echo 'VT-d not yet visible (enable in BIOS, set IOMMU kernel args)')"
+  if ls /sys/class/iommu/ 2>/dev/null | grep -q .; then
+    SYS_VTXD="VT-d active ✓"
+  else
+    SYS_VTXD="VT-d not yet visible (enable in BIOS, set IOMMU kernel args)"
+  fi
 
   section "System Information"
   echo "  CPU     : ${SYS_CPU} ${SYS_CPU_GEN:+(${SYS_CPU_GEN})}"
@@ -119,8 +121,8 @@ check_requirements() {
     warn_count=$((warn_count+1))
   fi
 
-  # VT-d / IOMMU check
-  if dmesg 2>/dev/null | grep -qiE 'DMAR|IOMMU.*enabled|iommu: enabling'; then
+  # VT-d / IOMMU check via sysfs (works without root, unlike dmesg)
+  if ls /sys/class/iommu/ 2>/dev/null | grep -q .; then
     echo -e "  ${GREEN}✓${RESET} VT-d/IOMMU active in kernel log"
     ok_count=$((ok_count+1))
   else
