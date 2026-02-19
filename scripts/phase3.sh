@@ -22,7 +22,12 @@ info()    { echo -e "${CYAN}[INFO]${RESET} $*"; }
 ok()      { echo -e "${GREEN}[OK]${RESET}  $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET} $*"; }
 err()     { echo -e "${RED}[ERR]${RESET}  $*" >&2; }
-section() { echo -e "\n${BOLD}══ $* ══${RESET}"; }
+section() {
+  local conf_hint=""
+  [ -n "${VM_CONF:-}" ] && [ -f "${VM_CONF}" ] && \
+    conf_hint="  ${CYAN}[$(basename "${VM_CONF}")]${RESET}"
+  echo -e "\n${BOLD}══ $* ══${RESET}${conf_hint}"
+}
 ask()     { echo -e "${YELLOW}[?]${RESET} $*"; }
 confirm() { ask "$1 [Y/n]: "; read -r _r; [[ "${_r:-Y}" =~ ^[Yy]$ ]]; }
 
@@ -70,49 +75,92 @@ _snap_summary() {
 # Step 0: Select VM conf
 # =============================================================================
 select_conf() {
-  section "Select VM Configuration"
+  section "Select VM to Configure"
 
-  # Load last state
   [ -f "$_STATE" ] && source "$_STATE" 2>/dev/null || true
 
+  # ── Installed VMs from virsh ───────────────────────────────────────────────
+  local -a VM_NAMES VM_STATES
+  while IFS= read -r line; do
+    local name state
+    name="$(echo "$line" | awk '{print $2}')"
+    state="$(echo "$line" | awk '{$1=$2=""; print $0}' | xargs)"
+    [ -z "$name" ] || [ "$name" = "Name" ] && continue
+    VM_NAMES+=("$name"); VM_STATES+=("$state")
+  done < <(virsh list --all 2>/dev/null | tail -n +3 || true)
+
+  # ── Available conf files ───────────────────────────────────────────────────
   mapfile -t EXISTING < <(ls "${VM_CONF_DIR}"/*.conf 2>/dev/null || true)
 
-  if [ ${#EXISTING[@]} -eq 0 ]; then
-    err "No VM conf files found in ${VM_CONF_DIR}/"
-    err "Run scripts/phase2.sh first to create a VM configuration."
+  if [ ${#VM_NAMES[@]} -eq 0 ] && [ ${#EXISTING[@]} -eq 0 ]; then
+    err "No VMs found in virsh and no conf files in ${VM_CONF_DIR}/"
+    err "Run scripts/phase2.sh first to create a VM."
     exit 1
   fi
 
+  echo ""
+  echo -e "${BOLD}  ── Installed VMs ───────────────────────────────────────────────${RESET}"
+  local idx=1
+  local -a CHOICES=()   # maps choice number → vm_name
+  local -a CONF_MAP=()  # maps choice number → conf file (may be empty)
   local default_idx=1
-  echo ""
-  local i=1
-  for f in "${EXISTING[@]}"; do
-    local nm; nm="$(basename "$f" .conf)"
-    local mark=""
-    if [ "${f}" = "${LAST_VM_CONF:-}" ]; then
-      mark=" ${YELLOW}← last used${RESET}"
-      default_idx=$i
-    fi
-    echo -e "    $i) $nm  (${f})${mark}"
-    (( i++ ))
-  done
-  echo ""
-  ask "Select configuration [1-$((i-1)), default=${default_idx}]: "; read -r _sel
-  _sel="${_sel:-$default_idx}"
 
-  if [[ "$_sel" =~ ^[0-9]+$ ]] && [ "$_sel" -ge 1 ] && [ "$_sel" -lt "$i" ]; then
-    VM_CONF="${EXISTING[$(( _sel - 1 ))]}"
-  else
-    VM_CONF="${EXISTING[$(( default_idx - 1 ))]}"
+  if [ ${#VM_NAMES[@]} -gt 0 ]; then
+    local v=0
+    for name in "${VM_NAMES[@]}"; do
+      local state="${VM_STATES[$v]:-}"
+      local conf_file=""
+      # Find matching conf file
+      for f in "${EXISTING[@]}"; do
+        local fn; fn="$(basename "$f" .conf)"
+        [ "$fn" = "$name" ] && { conf_file="$f"; break; }
+      done
+      local conf_hint=""; [ -n "$conf_file" ] && conf_hint="  ${CYAN}[conf: $(basename "$conf_file")]${RESET}"
+      local mark=""
+      [ "${name}" = "${LAST_VM_NAME:-}" ] && { mark=" ${YELLOW}← last used${RESET}"; default_idx=$idx; }
+      echo -e "    ${BOLD}${idx})${RESET} ${name}  (${state})${conf_hint}${mark}"
+      CHOICES+=("$name"); CONF_MAP+=("$conf_file")
+      (( idx++ )); (( v++ ))
+    done
   fi
 
-  [ -f "$VM_CONF" ] || { err "Missing ${VM_CONF}"; exit 1; }
+  # Conf files with no matching virsh VM
+  for f in "${EXISTING[@]}"; do
+    local fn; fn="$(basename "$f" .conf)"
+    local already=0
+    for name in "${VM_NAMES[@]}"; do [ "$name" = "$fn" ] && already=1; done
+    if [ $already -eq 0 ]; then
+      echo -e "    ${BOLD}${idx})${RESET} ${fn}  ${YELLOW}(conf only — not yet installed)${RESET}"
+      CHOICES+=("$fn"); CONF_MAP+=("$f")
+      (( idx++ ))
+    fi
+  done
+
+  echo ""
+  ask "Select VM to configure [1-$((idx-1)), default=${default_idx}]: "; read -r _sel
+  _sel="${_sel:-$default_idx}"
+
+  if ! [[ "$_sel" =~ ^[0-9]+$ ]] || [ "$_sel" -lt 1 ] || [ "$_sel" -ge "$idx" ]; then
+    _sel="$default_idx"
+  fi
+
+  local chosen_name="${CHOICES[$(( _sel - 1 ))]}"
+  VM_CONF="${CONF_MAP[$(( _sel - 1 ))]}"
+
+  if [ -z "$VM_CONF" ] || [ ! -f "$VM_CONF" ]; then
+    # Try to find any conf matching by name
+    VM_CONF="${VM_CONF_DIR}/${chosen_name}.conf"
+    if [ ! -f "$VM_CONF" ]; then
+      err "No conf file for '${chosen_name}'. Run phase2 first or place conf at ${VM_CONF}"
+      exit 1
+    fi
+  fi
+
   # shellcheck disable=SC1090
   source "$VM_CONF"
-
   VM_CONF_DIR="$(dirname "$VM_CONF")"
-  ok "Using conf: $VM_CONF"
-  info "VM: ${VM_NAME}  •  ${VM_VCPUS} vCPU  •  ${VM_RAM_MB} MB RAM  •  ${VM_STATIC_IP}"
+  ok "Selected VM: ${VM_NAME}  (conf: $(basename "$VM_CONF"))"
+  info "${VM_VCPUS} vCPU  •  $(( VM_RAM_MB / 1024 )) GB RAM  •  ${VM_STATIC_IP%/*}  •  tunnel: ${VM_TUNNEL_HOST:-not set}"
 }
 
 # =============================================================================

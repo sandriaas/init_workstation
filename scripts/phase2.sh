@@ -10,7 +10,12 @@ GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESE
 info()    { echo -e "${CYAN}[INFO]${RESET} $*"; }
 ok()      { echo -e "${GREEN}[OK]${RESET}  $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET} $*"; }
-section() { echo -e "\n${BOLD}══ $* ══${RESET}"; }
+section() {
+  local conf_hint=""
+  [ -n "${VM_CONF:-}" ] && [ -f "${VM_CONF}" ] && \
+    conf_hint="  ${CYAN}[$(basename "${VM_CONF}")]${RESET}"
+  echo -e "\n${BOLD}══ $* ══${RESET}${conf_hint}"
+}
 ask()     { echo -e "${YELLOW}[?]${RESET} $*"; }
 confirm() { ask "$1 [Y/n]: "; read -r r; [[ "${r:-Y}" =~ ^[Yy]$ ]]; }
 
@@ -1158,40 +1163,56 @@ _snap_summary() {
 
 select_or_create_conf() {
   local state="${VM_CONF_DIR}/.state"
-  # Load last state if present
   [ -f "$state" ] && source "$state" 2>/dev/null || true
 
   mapfile -t EXISTING < <(ls "${VM_CONF_DIR}"/*.conf 2>/dev/null || true)
-  [ ${#EXISTING[@]} -eq 0 ] && return  # No existing confs — go straight to prompts
 
   echo ""
-  echo -e "${BOLD}  Existing VM configurations:${RESET}"
+  echo -e "${BOLD}  ── VM Configurations ───────────────────────────────────────────${RESET}"
   local i=1
   for f in "${EXISTING[@]}"; do
     local nm; nm="$(basename "$f" .conf)"
+    # Peek at key fields from the conf
+    local _vcpus _ram _ip
+    _vcpus="$(grep -m1 "^VM_VCPUS=" "$f" 2>/dev/null | cut -d= -f2 | tr -d '"')"
+    _ram="$(grep -m1 "^VM_RAM_MB=" "$f" 2>/dev/null | cut -d= -f2 | tr -d '"')"
+    _ip="$(grep -m1 "^VM_STATIC_IP=" "$f" 2>/dev/null | cut -d= -f2 | tr -d '"' | cut -d/ -f1)"
+    local details=""
+    [ -n "${_vcpus}" ] && details="${_vcpus}vCPU"
+    [ -n "${_ram}" ] && details="${details:+${details} / }$(( ${_ram} / 1024 ))GB RAM"
+    [ -n "${_ip}" ] && details="${details:+${details} / }${_ip}"
     local mark=""; [ "${f}" = "${LAST_VM_CONF:-}" ] && mark=" ${YELLOW}← last used${RESET}"
-    echo -e "    $i) $nm  (${f})${mark}"
+    echo -e "    ${BOLD}$i)${RESET} ${nm}${details:+  (${details})}${mark}"
     (( i++ ))
   done
-  echo "    $i) Create new VM"
+  echo -e "    ${BOLD}$i)${RESET} Create new VM"
   echo ""
-  ask "Select configuration [1-$i, default=$i]: "; read -r _sel
-  _sel="$(default_if_empty "$_sel" "$i")"
+  local default_choice="$i"
+  [ -n "${LAST_VM_CONF:-}" ] && {
+    local j=1
+    for f in "${EXISTING[@]}"; do
+      [ "$f" = "$LAST_VM_CONF" ] && default_choice=$j
+      (( j++ ))
+    done
+  }
+  ask "Select configuration [1-$i, default=${default_choice}]: "; read -r _sel
+  _sel="$(default_if_empty "$_sel" "$default_choice")"
 
-  if [ "$_sel" -ge 1 ] && [ "$_sel" -lt "$i" ] 2>/dev/null; then
+  if [[ "$_sel" =~ ^[0-9]+$ ]] && [ "$_sel" -ge 1 ] && [ "$_sel" -lt "$i" ] 2>/dev/null; then
     VM_CONF="${EXISTING[$(( _sel - 1 ))]}"
     source_vm_conf
     VM_CONF_DIR="$(dirname "$VM_CONF")"
-    # Update VM_CONF path after loading VM_NAME
     VM_CONF="${VM_CONF_DIR}/${VM_NAME}.conf"
-    info "Loaded: $VM_CONF"
-    echo "  1) Use existing config as-is  (skip prompts)"
-    echo "  2) Edit config  (re-run all prompts with existing values as defaults)"
-    ask "Choice [1/2]: "; read -r _edit
-    if [ "${_edit:-1}" = "1" ]; then
+    echo ""
+    info "Selected: $(basename "$VM_CONF")  (${VM_NAME}  •  ${VM_VCPUS} vCPU  •  $(( VM_RAM_MB / 1024 )) GB RAM  •  ${VM_STATIC_IP%/*})"
+    echo "  1) Use existing config as-is  (skip all prompts)"
+    echo "  2) Edit config  (re-run prompts — existing values shown as defaults)"
+    ask "Choice [1/2, default=1]: "; read -r _edit
+    if [ "${_edit:-1}" != "2" ]; then
       SKIP_PROMPTS="yes"
     fi
   fi
+  # else: default choice is "create new" — leave SKIP_PROMPTS=no
 }
 
 main() {
@@ -1208,10 +1229,10 @@ main() {
   detect_system
   check_requirements
 
-  confirm "Proceed with Phase 2 VM setup?" || exit 0
-
   SKIP_PROMPTS="no"
   select_or_create_conf
+
+  confirm "Proceed with Phase 2 VM setup?" || exit 0
 
   _snap_pre "phase2 vm provision start"
 
