@@ -388,13 +388,13 @@ step_ssh() {
 # STEP 5: Cloudflare SSH Tunnel
 # =============================================================================
 step_cloudflare_tunnel() {
-  section "Step 5: Cloudflare SSH Tunnel"
+  section "Step 5: Cloudflare SSH + Cockpit Tunnel"
 
   if systemctl is-active cloudflared &>/dev/null; then
     ok "cloudflared already active. Skipping."; return
   fi
 
-  confirm "Set up Cloudflare SSH tunnel?" || { info "Skipped."; return; }
+  confirm "Set up Cloudflare tunnel (SSH + Cockpit web UI)?" || { info "Skipped."; return; }
 
   if ! command -v cloudflared &>/dev/null; then
     warn "cloudflared not installed — run Step 1 first."; return
@@ -403,8 +403,9 @@ step_cloudflare_tunnel() {
   echo ""
   info "You need: a Cloudflare account with your domain already added."
   echo ""
-  ask "Tunnel hostname (e.g. abc123.yourdomain.com): "; read -r TUNNEL_HOST
-  ask "Tunnel name (e.g. minipc-ssh): ";               read -r TUNNEL_NAME
+  ask "SSH tunnel hostname (e.g. minipc.yourdomain.com): ";    read -r TUNNEL_HOST
+  ask "Cockpit UI hostname (e.g. cockpit.yourdomain.com): ";   read -r COCKPIT_HOST
+  ask "Tunnel name (e.g. minipc-ssh): ";                       read -r TUNNEL_NAME
   echo ""
   info "Choose authentication method:"
   echo "  1) Browser login (opens browser — recommended for first time)"
@@ -414,10 +415,9 @@ step_cloudflare_tunnel() {
   if [ "${AUTH_CHOICE:-1}" = "2" ]; then
     ask "Cloudflare API token: "; read -rs CF_TOKEN; echo ""
     ask "Cloudflare Account ID: "; read -r CF_ACCOUNT_ID
-    # Write cert using API token (cloudflared uses TUNNEL_TOKEN env or cert.pem)
     export CLOUDFLARE_TUNNEL_TOKEN="$CF_TOKEN"
     sudo -u "$CURRENT_USER" CLOUDFLARE_API_TOKEN="$CF_TOKEN" cloudflared tunnel login --no-browser 2>/dev/null \
-      || { info "Falling back to token-based route DNS (no login needed for named tunnels with API token)"; }
+      || { info "Falling back to token-based route DNS"; }
   else
     info "Opening Cloudflare browser login..."
     sudo -u "$CURRENT_USER" cloudflared login
@@ -434,7 +434,7 @@ step_cloudflare_tunnel() {
   fi
   info "Tunnel ID: $TUNNEL_ID"
 
-  # Write tunnel config
+  # Write tunnel config — SSH + Cockpit ingress
   CRED_FILE="$USER_HOME/.cloudflared/${TUNNEL_ID}.json"
   mkdir -p "$USER_HOME/.cloudflared"
   cat > "$USER_HOME/.cloudflared/config.yml" << EOF
@@ -443,22 +443,17 @@ credentials-file: ${CRED_FILE}
 ingress:
   - hostname: ${TUNNEL_HOST}
     service: ssh://localhost:22
+  - hostname: ${COCKPIT_HOST:-}
+    service: http://localhost:9090
   - service: http_status:404
 EOF
   chown "$CURRENT_USER:$CURRENT_USER" "$USER_HOME/.cloudflared/config.yml"
 
-  # Create DNS CNAME record
-  info "Creating DNS CNAME: $TUNNEL_HOST → tunnel..."
-  if [ "${AUTH_CHOICE:-1}" = "2" ] && [ -n "${CF_TOKEN:-}" ]; then
-    # Use API to create CNAME if we have a token
-    ZONE_ID=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=$(echo "$TUNNEL_HOST" | rev | cut -d. -f1-2 | rev)" \
-      -H "Authorization: Bearer $CF_TOKEN" | python3 -c "import json,sys; print(json.load(sys.stdin)['result'][0]['id'])" 2>/dev/null || echo "")
-    if [ -n "$ZONE_ID" ]; then
-      sudo -u "$CURRENT_USER" cloudflared tunnel route dns "$TUNNEL_NAME" "$TUNNEL_HOST" || true
-    fi
-  else
-    sudo -u "$CURRENT_USER" cloudflared tunnel route dns "$TUNNEL_NAME" "$TUNNEL_HOST"
-  fi
+  # Create DNS CNAME records
+  info "Creating DNS CNAMEs..."
+  sudo -u "$CURRENT_USER" cloudflared tunnel route dns "$TUNNEL_NAME" "$TUNNEL_HOST" || true
+  [ -n "${COCKPIT_HOST:-}" ] && \
+    sudo -u "$CURRENT_USER" cloudflared tunnel route dns "$TUNNEL_NAME" "$COCKPIT_HOST" || true
 
   # Install systemd service
   sudo tee /etc/systemd/system/cloudflared.service > /dev/null << EOF
@@ -478,11 +473,14 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
   sudo systemctl daemon-reload && sudo systemctl enable --now cloudflared
-  ok "Cloudflare tunnel '$TUNNEL_NAME' live at $TUNNEL_HOST"
+  ok "Cloudflare tunnel '$TUNNEL_NAME' live"
+  ok "  SSH:     ssh ${CURRENT_USER}@${TUNNEL_HOST}"
+  ok "  Cockpit: https://${COCKPIT_HOST}"
 
-  # Save hostname for final summary
-  echo "$TUNNEL_HOST" > /tmp/phase1_tunnel_host
-  echo "$CURRENT_USER" > /tmp/phase1_tunnel_user
+  # Save for final summary
+  echo "$TUNNEL_HOST"   > /tmp/phase1_tunnel_host
+  echo "$COCKPIT_HOST"  > /tmp/phase1_cockpit_host
+  echo "$CURRENT_USER"  > /tmp/phase1_tunnel_user
 }
 
 
@@ -757,79 +755,74 @@ EOF
 
 
 print_final_summary() {
-  # Try temp file first (written by step_cloudflare_tunnel if it ran this session)
   TUNNEL_HOST_SAVED=""
-  [ -f /tmp/phase1_tunnel_host ] && TUNNEL_HOST_SAVED=$(cat /tmp/phase1_tunnel_host)
+  COCKPIT_HOST_SAVED=""
+  [ -f /tmp/phase1_tunnel_host ]  && TUNNEL_HOST_SAVED=$(cat /tmp/phase1_tunnel_host)
+  [ -f /tmp/phase1_cockpit_host ] && COCKPIT_HOST_SAVED=$(cat /tmp/phase1_cockpit_host)
 
-  # Fallback: parse all fields from existing cloudflared config.yml
-  TUNNEL_ID_SAVED=""
-  TUNNEL_NAME_SAVED=""
+  # Fallback: read from existing cloudflared config
   local cfg
   for cfg in "$USER_HOME/.cloudflared/config.yml" /etc/cloudflared/config.yml; do
     [ -f "$cfg" ] || continue
-    [ -z "$TUNNEL_HOST_SAVED" ] && \
-      TUNNEL_HOST_SAVED="$(awk '/hostname:/{print $NF; exit}' "$cfg" 2>/dev/null || true)"
-    [ -z "$TUNNEL_ID_SAVED" ] && \
-      TUNNEL_ID_SAVED="$(awk '/^tunnel:/{print $NF; exit}' "$cfg" 2>/dev/null || true)"
-    [ -n "$TUNNEL_HOST_SAVED" ] && break
+    if [ -z "$TUNNEL_HOST_SAVED" ]; then
+      TUNNEL_HOST_SAVED="$(awk '/service: ssh/{found=1} found && /hostname:/{print $NF; exit}' "$cfg" 2>/dev/null \
+        || awk '/hostname:/{print $NF; exit}' "$cfg" 2>/dev/null || true)"
+    fi
+    if [ -z "$COCKPIT_HOST_SAVED" ]; then
+      COCKPIT_HOST_SAVED="$(awk '/service: http:\/\/localhost:9090/{found=1} found && /hostname:/{print $NF}' "$cfg" 2>/dev/null \
+        || awk '/hostname:/{h=$NF} /localhost:9090/{print h}' "$cfg" 2>/dev/null || true)"
+    fi
+    break
   done
-  # Tunnel name from credentials JSON
-  if [ -n "${TUNNEL_ID_SAVED:-}" ]; then
-    local cred="$USER_HOME/.cloudflared/${TUNNEL_ID_SAVED}.json"
-    [ -f "$cred" ] && \
-      TUNNEL_NAME_SAVED="$(python3 -c "import json,sys; d=json.load(open('$cred')); print(d.get('TunnelName',''))" 2>/dev/null || true)"
-  fi
-
   TUNNEL_HOST_SAVED="${TUNNEL_HOST_SAVED:-YOUR_TUNNEL_HOST}"
-  local tunnel_domain="${TUNNEL_HOST_SAVED#*.}"
   local host_ip; host_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
 
   echo ""
   echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
-  echo -e "${BOLD}║              PHASE 1 COMPLETE                               ║${RESET}"
+  echo -e "${BOLD}║              ✓  PHASE 1 COMPLETE                            ║${RESET}"
   echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
+
   echo ""
-  echo -e "${BOLD}  ── Cloudflare SSH Tunnel ──────────────────────────────────${RESET}"
-  printf "  %-20s %s\n" "Hostname:"     "$TUNNEL_HOST_SAVED"
-  printf "  %-20s %s\n" "Domain:"       "$tunnel_domain"
-  [ -n "${TUNNEL_NAME_SAVED:-}" ] && printf "  %-20s %s\n" "Tunnel name:"  "$TUNNEL_NAME_SAVED"
-  [ -n "${TUNNEL_ID_SAVED:-}" ]   && printf "  %-20s %s\n" "Tunnel ID:"    "$TUNNEL_ID_SAVED"
-  printf "  %-20s %s\n" "Host LAN IP:"  "$host_ip"
+  echo -e "${BOLD}  ┌─ SSH Access ───────────────────────────────────────────────${RESET}"
+  printf "  │  %-18s %s\n" "LAN:"          "ssh ${CURRENT_USER}@${host_ip}"
+  printf "  │  %-18s %s\n" "Via tunnel:"   "ssh ${CURRENT_USER}@${TUNNEL_HOST_SAVED}"
+
   echo ""
-  echo -e "  ${BOLD}Connect from anywhere:${RESET}  ssh ${CURRENT_USER}@${TUNNEL_HOST_SAVED}"
+  echo -e "${BOLD}  ├─ Cockpit Web UI ──────────────────────────────────────────${RESET}"
+  printf "  │  %-18s %s\n" "LAN:"          "http://${host_ip}:9090"
+  if [ -n "${COCKPIT_HOST_SAVED:-}" ]; then
+    printf "  │  %-18s %s\n" "Via tunnel:"  "https://${COCKPIT_HOST_SAVED}"
+  else
+    printf "  │  %-18s %s\n" "Via tunnel:"  "(run step_cloudflare_tunnel to set up)"
+  fi
+  printf "  │  %-18s %s\n" "Status:"       "$(systemctl is-active cockpit.socket 2>/dev/null || echo unknown)"
+
   echo ""
-  echo -e "${BOLD}  ── On each client device (phone, laptop, etc.) ──────────${RESET}"
+  echo -e "${BOLD}  ├─ Cloudflare Tunnel ───────────────────────────────────────${RESET}"
+  printf "  │  %-18s %s\n" "Status:"       "$(systemctl is-active cloudflared 2>/dev/null || echo not configured)"
+  printf "  │  %-18s %s\n" "SSH host:"     "${TUNNEL_HOST_SAVED}"
+  [ -n "${COCKPIT_HOST_SAVED:-}" ] && \
+    printf "  │  %-18s %s\n" "Cockpit host:" "${COCKPIT_HOST_SAVED}"
+
   echo ""
-  echo -e "  bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)"
+  echo -e "${BOLD}  ├─ Client Setup ────────────────────────────────────────────${RESET}"
+  echo   "  │  Run on each client device (phone, laptop):"
+  echo   "  │    bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)"
+  echo   "  │  Then: ssh minipc"
+
   echo ""
-  echo -e "  Then: ${GREEN}ssh minipc${RESET}"
+  echo -e "${BOLD}  └─ Next Steps ───────────────────────────────────────────────${RESET}"
+  echo -e "     ${YELLOW}⚠  REBOOT REQUIRED: IOMMU + SR-IOV + docker/libvirt groups${RESET}"
+  echo   "     After reboot:"
+  echo   "       sudo bash scripts/phase2.sh   # Create Ubuntu VM"
+  echo   "     Verify:"
+  echo   "       uname -r && dkms status"
+  echo   "       cat /proc/cmdline | grep iommu"
+  echo   "       cat /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs"
+  echo   "       systemctl status cloudflared cockpit.socket"
   echo ""
-  echo -e "${YELLOW}⚠  REBOOT REQUIRED to activate: IOMMU + SR-IOV + docker/libvirt groups${RESET}"
-  echo ""
-  echo -e "${BOLD}  Auto-start on boot (no login required):${RESET}"
-  echo "    sshd      — enabled (systemd, starts before login)"
-  echo "    cloudflared — enabled, After=network-online.target (auto-reconnects tunnel)"
-  echo "    → After sudo reboot, SSH from phone reconnects automatically once network is up."
-  echo ""
-  echo -e "${YELLOW}  ⚠  If machine shows NO DISPLAY or fails to boot after reboot:${RESET}"
-  echo "     → Reboot and select the PREVIOUS kernel from the bootloader menu"
-  echo "        Limine : press any key at boot → select 'linux-cachyos' (non-lts)"
-  echo "        GRUB   : press ESC/SHIFT at boot → Advanced options → previous kernel"
-  echo "     → Then re-run: sudo bash scripts/phase1.sh"
-  echo ""
-  echo "  After reboot verify:"
-  echo "    uname -r                                 # → should match dkms-built kernel"
-  echo "    dkms status                              # → i915-sriov-dkms/..., <kernel>: installed"
-  echo "    cat /proc/cmdline | grep iommu           # → intel_iommu=on iommu=pt"
-  echo "    cat /proc/cmdline | grep i915            # → i915.enable_guc=3 i915.max_vfs=7"
-  echo "    cat /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs  # → 7 (or your VF count)"
-  echo "    lspci -nnk -s 00:02 | grep 'driver in use'  # → i915 on PF, vfio-pci on VFs"
-  echo "    ls /dev/dri/                             # → card0/renderD128"
-  echo "    docker run --rm hello-world"
-  echo "    systemctl status cloudflared"
-  echo ""
-  rm -f /tmp/phase1_tunnel_host /tmp/phase1_tunnel_user
-  # Write state file so phase2/3 know phase1 is done
+
+  rm -f /tmp/phase1_tunnel_host /tmp/phase1_cockpit_host /tmp/phase1_tunnel_user
   local state="${REPO_DIR}/generated-vm/.state"
   mkdir -p "${REPO_DIR}/generated-vm"
   if [ ! -f "$state" ]; then

@@ -370,26 +370,29 @@ step() { echo -e "\n${BOLD}  ── $* ──${RESET}"; }
 # ── Step 3: Install packages ────────────────────────────────────────────────
 step "Step 3: Install base packages"
 if command -v apt-get >/dev/null 2>&1; then
-  apt-get update
+  apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    curl wget openssh-server fail2ban net-tools \
-    dkms "linux-headers-$(uname -r)" build-essential
+    curl wget openssh-server fail2ban
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y curl wget openssh-server fail2ban net-tools \
-    dkms "kernel-devel-$(uname -r)"
+  dnf install -y curl wget openssh-server fail2ban
 elif command -v pacman >/dev/null 2>&1; then
-  pacman -Syu --noconfirm --needed curl wget openssh fail2ban net-tools dkms linux-headers
+  pacman -Syu --noconfirm --needed curl wget openssh fail2ban
 fi
 ok "Packages installed."
 
 # ── Step 4: SSH + fail2ban ──────────────────────────────────────────────────
 step "Step 4: Configure SSH + fail2ban"
-systemctl enable --now sshd || systemctl enable --now ssh || true
-systemctl enable --now fail2ban || true
-sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
-systemctl reload sshd || systemctl reload ssh || true
-ok "SSH enabled. fail2ban enabled."
+if grep -q "^PasswordAuthentication yes" /etc/ssh/sshd_config 2>/dev/null \
+   && systemctl is-active --quiet sshd 2>/dev/null; then
+  ok "SSH already configured — skipping."
+else
+  systemctl enable --now sshd || systemctl enable --now ssh || true
+  systemctl enable --now fail2ban || true
+  sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
+  systemctl reload sshd || systemctl reload ssh || true
+  ok "SSH enabled. fail2ban enabled."
+fi
 
 # ── Step 5: Static IP via netplan ───────────────────────────────────────────
 step "Step 5: Set static IP (${VM_STATIC_IP})"
