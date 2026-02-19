@@ -1,4 +1,2 @@
 *.json
 *.credentials
-generated-vm/*
-!generated-vm/.gitkeep
