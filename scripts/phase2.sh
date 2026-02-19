@@ -223,7 +223,9 @@ prompt_resource_and_vm_basics() {
   TOTAL_THREADS="$(nproc)"
   TOTAL_RAM_GB="$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)"
 
-  VM_NAME_DEFAULT="server-vm"
+  # Default VM name: vm_N where N = next available number
+  local _existing_count; _existing_count="$(virsh list --all --name 2>/dev/null | grep -c "^vm_" || echo 0)"
+  VM_NAME_DEFAULT="vm_$(( _existing_count + 1 ))"
   VM_USER_DEFAULT="$CURRENT_USER"
   VM_HOSTNAME_DEFAULT="ubuntu-server"
   VM_VCPUS_DEFAULT="${SUGGESTED_VM_VCPUS:-14}"
@@ -984,6 +986,58 @@ EOF
   chown "${CURRENT_USER}:${CURRENT_USER}" "$state"
 }
 
+# Quick non-blocking SSH test — just checks TCP port 22 reachable (no auth needed)
+VM_SSH_RESULT="not tested"
+VM_SSH_IP=""
+test_vm_ssh() {
+  section "Confirming VM SSH (waiting for Ubuntu install to complete)"
+  source_vm_conf
+
+  local vm_ip="${VM_STATIC_IP%/*}"
+  local max=180  # up to 15 min for autoinstall
+  [ "${VM_AUTOINSTALL:-yes}" != "yes" ] && max=12  # 1 min if manual (already confirmed)
+
+  info "Polling SSH at ${VM_USER}@${vm_ip} (up to $(( max * 5 / 60 )) min)..."
+  if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
+    info "Optional — watch progress: sudo virsh console ${VM_NAME}  (exit: Ctrl+])"
+  fi
+
+  local attempts=0
+  while [ $attempts -lt $max ]; do
+    # Prefer DHCP IP until static is assigned
+    local cur_ip="$vm_ip"
+    local dhcp; dhcp="$(virsh domifaddr "$VM_NAME" 2>/dev/null \
+      | awk '/ipv4/{print $4}' | cut -d/ -f1 | head -1 || true)"
+    [ -n "${dhcp:-}" ] && cur_ip="$dhcp"
+
+    if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=3 -o BatchMode=yes \
+           "${VM_USER}@${cur_ip}" true 2>/dev/null; then
+      echo ""
+      VM_SSH_IP="$cur_ip"
+      VM_SSH_RESULT="✓  ${VM_USER}@${cur_ip}"
+      ok "VM SSH confirmed: ssh ${VM_USER}@${cur_ip}"
+      # Save confirmed IP to state
+      local state="${VM_CONF_DIR}/.state"
+      [ -f "$state" ] && sed -i "s|^VM_SSH_IP=.*||" "$state" || true
+      echo "VM_SSH_IP=\"${cur_ip}\"" >> "$state"
+      return
+    fi
+    (( attempts++ ))
+    if (( attempts % 12 == 0 )); then
+      local elapsed=$(( attempts * 5 / 60 ))
+      local vm_state; vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
+      printf "\r  [%d min] VM state: %-12s  waiting for SSH...    " "$elapsed" "$vm_state"
+    else
+      printf "\r  Waiting for SSH... (%d/%d)    " "$attempts" "$max"
+    fi
+    sleep 5
+  done
+  echo ""
+  VM_SSH_IP="$vm_ip"
+  VM_SSH_RESULT="not yet reachable (check with: virsh console ${VM_NAME})"
+  warn "VM SSH not confirmed after $(( max * 5 / 60 )) min — Phase 3 will retry automatically."
+}
+
 print_summary() {
   source_vm_conf
   local HOST_IP; HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -1036,6 +1090,16 @@ print_summary() {
   echo ""
   echo -e "${BOLD}  ── VM Status ────────────────────────────────────────────────${RESET}"
   virsh list --all 2>/dev/null | sed 's/^/  /' || true
+  echo ""
+  echo -e "${BOLD}  ── SSH Access ───────────────────────────────────────────────${RESET}"
+  printf "  %-20s %s\n" "SSH status:"   "${VM_SSH_RESULT:-not tested}"
+  printf "  %-20s %s\n" "Direct (LAN):" "ssh ${VM_USER}@${VM_SSH_IP:-${VM_STATIC_IP%/*}}"
+  echo ""
+  echo -e "${BOLD}  ── SSH Access ───────────────────────────────────────────────${RESET}"
+  printf "  %-20s %s\n" "SSH status:"  "${VM_SSH_RESULT:-not tested}"
+  printf "  %-20s %s\n" "Direct (LAN):" "ssh ${VM_USER}@${VM_SSH_IP:-$VM_IP}"
+  printf "  %-20s %s\n" "Via tunnel:"   "ssh ${VM_USER}@${VM_TUNNEL_HOST}  (after phase 3)"
+  printf "  %-20s %s\n" "Console:"      "sudo virsh console ${VM_NAME}  (Ctrl+] to exit)"
   echo ""
   echo -e "${YELLOW}  ── Next Steps ───────────────────────────────────────────────${RESET}"
   if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
@@ -1167,6 +1231,7 @@ main() {
   install_sriov_host
   create_vm
   write_state
+  test_vm_ssh
   _snap_post "phase2 vm provision complete"
   print_summary
 }
