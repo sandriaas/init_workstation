@@ -1076,7 +1076,7 @@ create_vm() {
       --network "network=${VM_NET_SOURCE:-default},model=${VM_NET_MODEL:-virtio}" \
       --graphics "${VM_GRAPHICS:-none}" \
       --video "${VM_VIDEO:-none}" \
-      --serial "file,path=/var/log/libvirt/qemu/${VM_NAME}-serial.log" \
+      --serial pty \
       --import \
       --noautoconsole; then
       err "virt-install failed!"
@@ -1176,15 +1176,7 @@ test_vm_ssh() {
   local max=60   # 5 min — cloud-init takes ~2 min, allow buffer for slow boot
   info "Polling SSH at ${VM_USER}@${vm_ip} (up to ~5 min)..."
   info "cloud-init configures on first boot then reboots — SSH appears after reboot."
-
-  # Stream VM serial console output (cloud-init logs visible in real time)
-  local serial_log="/var/log/libvirt/qemu/${VM_NAME}-serial.log"
-  local tail_pid=""
-  if sudo test -f "$serial_log" 2>/dev/null; then
-    echo "── VM console output ─────────────────────────────────────"
-    sudo tail -f "$serial_log" 2>/dev/null &
-    tail_pid=$!
-  fi
+  info "Watch console:  sudo virsh console ${VM_NAME}  (Ctrl+] to exit)"
 
   local attempts=0
   while [ $attempts -lt $max ]; do
@@ -1208,7 +1200,6 @@ test_vm_ssh() {
     if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=3 -o BatchMode=yes \
            "${VM_USER}@${cur_ip}" true 2>/dev/null; then
       echo ""
-      [ -n "$tail_pid" ] && kill "$tail_pid" 2>/dev/null && echo "──────────────────────────────────────────────────────────"
       VM_SSH_IP="$cur_ip"
       VM_SSH_RESULT="✓  ${VM_USER}@${cur_ip}"
       ok "VM SSH confirmed: ssh ${VM_USER}@${cur_ip}"
@@ -1228,7 +1219,6 @@ test_vm_ssh() {
     sleep 5
   done
   echo ""
-  [ -n "$tail_pid" ] && kill "$tail_pid" 2>/dev/null && echo "──────────────────────────────────────────────────────────"
   VM_SSH_IP="$vm_ip"
   VM_SSH_RESULT="not yet reachable (check with: virsh console ${VM_NAME})"
   warn "VM SSH not confirmed after $(( max * 5 / 60 )) min — Phase 3 will retry automatically."
@@ -1314,7 +1304,7 @@ print_summary() {
   printf "  │  %-16s %s\n"  "VM conf:"      "$VM_CONF"
   printf "  │  %-16s %s\n"  "Seed ISO:"     "${VM_CONF_DIR}/${VM_NAME}-seed.iso"
   printf "  │  %-16s %s\n"  "State:"        "${VM_CONF_DIR}/.state"
-  printf "  │  %-16s %s\n"  "Serial log:"   "/var/log/libvirt/qemu/${VM_NAME}-serial.log"
+  printf "  │  %-16s %s\n"  "Console:"      "sudo virsh console ${VM_NAME}  (Ctrl+] to exit)"
 
   # ── Next Steps ───────────────────────────────────────────────────────────────
   echo ""
