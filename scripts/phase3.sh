@@ -334,11 +334,24 @@ run_remote_setup() {
   sudo iptables -t nat -C POSTROUTING -s 192.168.122.0/24 ! -d 192.168.122.0/24 -j MASQUERADE 2>/dev/null \
     || sudo iptables -t nat -A POSTROUTING -s 192.168.122.0/24 ! -d 192.168.122.0/24 -j MASQUERADE 2>/dev/null || true
 
+  # Prompt for tunnel token on HOST (before SSH — no TTY inside remote heredoc)
+  local VM_TUNNEL_TOKEN="${VM_TUNNEL_TOKEN:-}"
+  if [ -z "$VM_TUNNEL_TOKEN" ]; then
+    echo ""
+    echo "  ── Cloudflare Tunnel Token ────────────────────────────────"
+    echo "  Get from: dash.cloudflare.com → Zero Trust → Networks → Tunnels"
+    echo "  Select tunnel '${VM_TUNNEL_NAME}' → Configure → Install connector → token"
+    echo ""
+    read -r -p "  Paste tunnel token (Enter to skip): " VM_TUNNEL_TOKEN
+    echo ""
+  fi
+
   ssh -T -o StrictHostKeyChecking=accept-new "${VM_SSH_USER}@${VM_SSH_HOST}" \
     "VM_NAME='${VM_NAME}' \
      VM_AUTOINSTALL='${VM_AUTOINSTALL:-yes}' \
      VM_TUNNEL_HOST='${VM_TUNNEL_HOST}' \
      VM_TUNNEL_NAME='${VM_TUNNEL_NAME}' \
+     VM_TUNNEL_TOKEN='${VM_TUNNEL_TOKEN}' \
      VM_STATIC_IP='${VM_STATIC_IP}' \
      VM_GATEWAY='${VM_GATEWAY}' \
      VM_DNS='${VM_DNS}' \
@@ -450,44 +463,14 @@ fi
 ok "cloudflared installed: $(cloudflared --version 2>/dev/null | head -1)"
 
 step "Step 8b: Set up Cloudflare tunnel (VM: ${VM_TUNNEL_NAME} → ${VM_TUNNEL_HOST})"
-echo ""
-echo "  Tunnel: ${VM_TUNNEL_NAME}"
-echo "  Host:   ${VM_TUNNEL_HOST}"
-echo ""
-echo "  Choose tunnel install method:"
-echo "    1) Token-based  (paste token from Cloudflare dashboard — recommended)"
-echo "    2) Browser login  (cloudflared login — opens browser URL)"
-read -r -p "  Choice [1/2, default=1]: " CHOICE
-CHOICE="${CHOICE:-1}"
+echo "  Tunnel: ${VM_TUNNEL_NAME}  →  ${VM_TUNNEL_HOST}"
 
-if [ "$CHOICE" = "2" ]; then
-  cloudflared login
-  cloudflared tunnel create "${VM_TUNNEL_NAME}" || true
-  cloudflared tunnel route dns "${VM_TUNNEL_NAME}" "${VM_TUNNEL_HOST}" || true
-  mkdir -p /root/.cloudflared
-  TUNNEL_ID="$(cloudflared tunnel list 2>/dev/null | awk -v n="${VM_TUNNEL_NAME}" '$2==n{print $1; exit}')"
-  if [ -n "${TUNNEL_ID:-}" ]; then
-    cat > /root/.cloudflared/config.yml <<EOF
-tunnel: ${TUNNEL_ID}
-credentials-file: /root/.cloudflared/${TUNNEL_ID}.json
-ingress:
-  - hostname: ${VM_TUNNEL_HOST}
-    service: ssh://localhost:22
-  - service: http_status:404
-EOF
-    cloudflared service install
-    ok "Tunnel configured: ${VM_TUNNEL_HOST}"
-  else
-    warn "Could not find tunnel ID for '${VM_TUNNEL_NAME}' — configure manually."
-  fi
+if [ -n "${VM_TUNNEL_TOKEN:-}" ]; then
+  cloudflared service install "$VM_TUNNEL_TOKEN"
+  ok "Tunnel installed via token."
 else
-  read -r -p "  Paste Tunnel Token: " TUNNEL_TOKEN
-  if [ -n "${TUNNEL_TOKEN:-}" ]; then
-    cloudflared service install "$TUNNEL_TOKEN"
-    ok "Tunnel installed via token."
-  else
-    warn "No token provided — skipping tunnel install."
-  fi
+  warn "No tunnel token provided — run phase3 again with token to activate tunnel."
+  warn "  Get token: dash.cloudflare.com → Zero Trust → Networks → Tunnels → ${VM_TUNNEL_NAME} → Configure"
 fi
 
 systemctl enable --now cloudflared || true
