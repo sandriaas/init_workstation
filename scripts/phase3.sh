@@ -459,14 +459,17 @@ step "Step 8b: Set up Cloudflare tunnel (VM: ${VM_TUNNEL_NAME} → ${VM_TUNNEL_H
 echo "  Tunnel: ${VM_TUNNEL_NAME}  →  ${VM_TUNNEL_HOST}"
 
 if [ -n "${VM_TUNNEL_TOKEN:-}" ]; then
+  # Uninstall first so reinstall always picks up the correct token
+  cloudflared service uninstall 2>/dev/null || true
   cloudflared service install "$VM_TUNNEL_TOKEN"
-  ok "Tunnel installed via token."
+  systemctl enable --now cloudflared || true
+  ok "Tunnel installed via token (cloudflared tunnel run --token ...)."
 else
+  # Service already installed — just make sure it's running
+  systemctl enable --now cloudflared 2>/dev/null || true
   warn "No tunnel token provided — run phase3 again with token to activate tunnel."
   warn "  Get token: dash.cloudflare.com → Zero Trust → Networks → Tunnels → ${VM_TUNNEL_NAME} → Configure"
 fi
-
-systemctl enable --now cloudflared || true
 
 echo ""
 ok "VM internal configuration complete."
@@ -622,13 +625,21 @@ main() {
   # Step 2: poll SSH until reachable
   wait_for_ssh
 
-  # Steps 3–8: configure VM internals over SSH — skip if already done
-  local _cf_running; _cf_running="$(ssh -T -o StrictHostKeyChecking=accept-new \
+  # Steps 3–8: configure VM internals over SSH
+  # Skip full setup only if cloudflared is active AND tunnel is registered with Cloudflare
+  local _cf_running _cf_connected
+  _cf_running="$(ssh -T -o StrictHostKeyChecking=accept-new \
     -o ConnectTimeout=5 -o BatchMode=yes "${VM_SSH_USER}@${VM_SSH_HOST}" \
     "systemctl is-active cloudflared 2>/dev/null || echo inactive" 2>/dev/null || echo inactive)"
-  if [ "$_cf_running" = "active" ]; then
-    ok "VM already configured (cloudflared active) — skipping remote setup."
+  _cf_connected="$(ssh -T -o StrictHostKeyChecking=accept-new \
+    -o ConnectTimeout=5 -o BatchMode=yes "${VM_SSH_USER}@${VM_SSH_HOST}" \
+    "journalctl -u cloudflared -n 50 --no-pager 2>/dev/null | grep -c 'Connection registered' || echo 0" \
+    2>/dev/null || echo 0)"
+
+  if [ "$_cf_running" = "active" ] && [ "${_cf_connected:-0}" -gt 0 ]; then
+    ok "VM already configured (cloudflared active + tunnel connected) — skipping remote setup."
   else
+    [ "$_cf_running" = "active" ] && info "cloudflared active but tunnel not connected — re-running step 8."
     run_remote_setup
   fi
 
