@@ -483,11 +483,21 @@ install_sriov_host() {
   source_vm_conf  # ensure all vm.conf vars (incl. KERNEL_GPU_ARGS) are loaded
   section "Host SR-IOV Setup (${GPU_DRIVER})"
 
-  # Skip if phase1 already configured SR-IOV kernel args
-  if grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/limine 2>/dev/null || \
-     grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/grub 2>/dev/null; then
-    ok "SR-IOV kernel args already present (set by phase1). Skipping."
+  # Skip only if BOTH kernel args AND dkms module are already in place (phase1 ran step 6)
+  SRIOV_ARGS_SET=false
+  SRIOV_DKMS_SET=false
+  { grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/limine 2>/dev/null || \
+    grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/grub 2>/dev/null; } && SRIOV_ARGS_SET=true
+  { pacman -Q i915-sriov-dkms >/dev/null 2>&1 || \
+    dpkg -s i915-sriov-dkms >/dev/null 2>&1 || \
+    rpm -q akmod-i915-sriov >/dev/null 2>&1; } && SRIOV_DKMS_SET=true
+
+  if $SRIOV_ARGS_SET && $SRIOV_DKMS_SET; then
+    ok "SR-IOV kernel args + i915-sriov-dkms already present (set by phase1). Skipping."
     return
+  fi
+  if $SRIOV_ARGS_SET && ! $SRIOV_DKMS_SET; then
+    warn "Kernel args already set but i915-sriov-dkms not installed — continuing to install dkms."
   fi
 
   # Guide warning: remove disable_vga=1 if present (breaks IGD passthrough)

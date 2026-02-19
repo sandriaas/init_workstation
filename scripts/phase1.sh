@@ -465,11 +465,21 @@ step_sriov_host() {
   # Load existing vm.conf if already done
   [ -f "$VM_CONF" ] && source "$VM_CONF" 2>/dev/null || true
 
-  # Skip if already fully configured
-  if grep -q "i915.max_vfs=" /etc/default/limine 2>/dev/null || \
-     grep -q "i915.max_vfs=" /etc/default/grub 2>/dev/null; then
-    ok "SR-IOV kernel args already set. Skipping."
+  # Skip only if BOTH kernel args AND dkms module are already in place
+  SRIOV_ARGS_SET=false
+  SRIOV_DKMS_SET=false
+  { grep -q "i915.max_vfs=" /etc/default/limine 2>/dev/null || \
+    grep -q "i915.max_vfs=" /etc/default/grub 2>/dev/null; } && SRIOV_ARGS_SET=true
+  { pacman -Q i915-sriov-dkms >/dev/null 2>&1 || \
+    dpkg -s i915-sriov-dkms >/dev/null 2>&1 || \
+    rpm -q akmod-i915-sriov >/dev/null 2>&1; } && SRIOV_DKMS_SET=true
+
+  if $SRIOV_ARGS_SET && $SRIOV_DKMS_SET; then
+    ok "SR-IOV kernel args + i915-sriov-dkms already in place. Skipping."
     return
+  fi
+  if $SRIOV_ARGS_SET && ! $SRIOV_DKMS_SET; then
+    warn "Kernel args already set but i915-sriov-dkms is NOT installed — continuing to install dkms."
   fi
 
   confirm "Set up Intel iGPU SR-IOV (needed for GPU passthrough to VM)?" || { info "Skipped."; return; }
