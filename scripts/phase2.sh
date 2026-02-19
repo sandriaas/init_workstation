@@ -45,6 +45,115 @@ detect_user() {
   info "Target user: $CURRENT_USER ($USER_HOME)"
 }
 
+detect_system() {
+  SYS_CPU="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs)"
+  SYS_RAM_TOTAL="$(free -h 2>/dev/null | awk '/^Mem/{print $2}')"
+  SYS_RAM_MB="$(free -m 2>/dev/null | awk '/^Mem/{print $2}')"
+  SYS_KERNEL="$(uname -r)"
+  SYS_IGPU="$(lspci 2>/dev/null | grep -iE 'VGA|Display' | grep -i intel | head -1 | sed 's/.*: //')"
+  SYS_DGPU="$(lspci 2>/dev/null | grep -iE 'VGA|Display' | grep -iv intel | head -1 | sed 's/.*: //')"
+  SYS_DISKS="$(lsblk -d -o NAME,SIZE,MODEL --noheadings 2>/dev/null | grep -v loop | awk '{printf "%s(%s) ", $1,$2}')"
+  SYS_BOOT_MODE="$( [ -d /sys/firmware/efi ] && echo 'UEFI ✓' || echo 'Legacy/CSM ✗')"
+  SYS_NCPU="$(nproc 2>/dev/null || echo '?')"
+
+  # Detect Intel CPU gen from model name
+  SYS_CPU_GEN=""
+  if echo "$SYS_CPU" | grep -qiE 'i[3579]-12[0-9]{3}'; then
+    SYS_CPU_GEN="12th gen Alder Lake"
+  elif echo "$SYS_CPU" | grep -qiE 'i[3579]-13[0-9]{3}'; then
+    SYS_CPU_GEN="13th gen Raptor Lake"
+  elif echo "$SYS_CPU" | grep -qiE 'i[3579]-14[0-9]{3}'; then
+    SYS_CPU_GEN="14th gen Raptor Lake Refresh"
+  fi
+
+  SYS_VTXD="$(dmesg 2>/dev/null | grep -qiE 'DMAR|IOMMU.*enabled|iommu: enabling' \
+    && echo 'VT-d active ✓' || echo 'VT-d: set kernel args + BIOS')"
+
+  section "System Information"
+  echo "  CPU     : ${SYS_CPU} ${SYS_CPU_GEN:+(${SYS_CPU_GEN})}"
+  echo "  Cores   : ${SYS_NCPU} logical CPUs"
+  echo "  RAM     : ${SYS_RAM_TOTAL} total"
+  echo "  iGPU    : ${SYS_IGPU:-not detected}"
+  [ -n "${SYS_DGPU}" ] && echo "  dGPU    : ${SYS_DGPU}"
+  echo "  Storage : ${SYS_DISKS}"
+  echo "  Kernel  : ${SYS_KERNEL}"
+  echo "  Boot    : ${SYS_BOOT_MODE}"
+  echo "  IOMMU   : ${SYS_VTXD}"
+  echo ""
+
+  # Suggest sensible VM defaults based on actual hardware
+  SUGGESTED_VM_RAM_MB=$(( SYS_RAM_MB * 60 / 100 ))
+  SUGGESTED_VM_VCPUS=$(( SYS_NCPU * 3 / 4 ))
+  [ "$SUGGESTED_VM_VCPUS" -lt 2 ] && SUGGESTED_VM_VCPUS=2
+  info "Suggested VM RAM: ~${SUGGESTED_VM_RAM_MB}MB (60% of ${SYS_RAM_TOTAL}) — VM CPUs: ~${SUGGESTED_VM_VCPUS} (75% of ${SYS_NCPU})"
+  echo ""
+}
+
+check_requirements() {
+  section "Requirements Check"
+  echo "  Per LongQT-sea/intel-igpu-passthru guide:"
+  echo ""
+
+  local warn_count=0
+
+  # UEFI
+  if [ -d /sys/firmware/efi ]; then
+    echo -e "  ${GREEN}✓${RESET} UEFI boot mode"
+  else
+    echo -e "  ${YELLOW}✗${RESET} Legacy/CSM boot — BIOS: enable UEFI-only, disable Legacy/CSM"
+    warn_count=$((warn_count+1))
+  fi
+
+  # Kernel ≥ 6.8
+  KVER_MAJOR="$(uname -r | cut -d. -f1)"
+  KVER_MINOR="$(uname -r | cut -d. -f2)"
+  if [ "$KVER_MAJOR" -gt 6 ] || { [ "$KVER_MAJOR" -eq 6 ] && [ "$KVER_MINOR" -ge 8 ]; }; then
+    echo -e "  ${GREEN}✓${RESET} Kernel $(uname -r) ≥ 6.8"
+  else
+    echo -e "  ${YELLOW}✗${RESET} Kernel $(uname -r) < 6.8 — SR-IOV requires kernel 6.8+"
+    warn_count=$((warn_count+1))
+  fi
+
+  # Intel iGPU present
+  if lspci 2>/dev/null | grep -iE 'VGA|Display' | grep -qi intel; then
+    echo -e "  ${GREEN}✓${RESET} Intel iGPU detected"
+  else
+    echo -e "  ${YELLOW}✗${RESET} No Intel iGPU — BIOS: set Primary Display = iGPU / Integrated"
+    warn_count=$((warn_count+1))
+  fi
+
+  # VT-d check
+  if dmesg 2>/dev/null | grep -qiE 'DMAR|IOMMU.*enabled|iommu: enabling'; then
+    echo -e "  ${GREEN}✓${RESET} VT-d/IOMMU active"
+  else
+    echo -e "  ${YELLOW}!${RESET} VT-d not confirmed in dmesg — BIOS: enable Intel VT-d"
+    warn_count=$((warn_count+1))
+  fi
+
+  # VFs available (SR-IOV already configured by phase1)
+  if [ -d /sys/class/drm ] && ls /sys/bus/pci/devices/0000:00:02.0/virtfn* >/dev/null 2>&1; then
+    VF_COUNT="$(ls /sys/bus/pci/devices/0000:00:02.0/virtfn* 2>/dev/null | wc -l)"
+    echo -e "  ${GREEN}✓${RESET} SR-IOV VFs active: ${VF_COUNT} VF(s) on 0000:00:02.0"
+  else
+    echo -e "  ${YELLOW}!${RESET} SR-IOV VFs not yet active — run phase1 + reboot first"
+  fi
+
+  echo ""
+  echo "  Required BIOS/UEFI settings (set before running):"
+  echo "    • UEFI-only boot (disable Legacy/CSM)    • VGA OpROM = UEFI"
+  echo "    • Intel VT-d = Enabled                   • Primary display = iGPU/Integrated"
+  echo ""
+  echo "  VM (phase2/3 will handle): OVMF firmware · headless · SSH+tunnel via phase3"
+  echo ""
+
+  if [ "$warn_count" -gt 0 ]; then
+    warn "${warn_count} requirement(s) not confirmed — review before proceeding."
+    confirm "Continue anyway?" || { echo "Aborted."; exit 0; }
+  else
+    ok "All requirements met."
+  fi
+}
+
 default_if_empty() {
   local v="${1:-}" d="${2:-}"
   [ -n "$v" ] && echo "$v" || echo "$d"
@@ -74,8 +183,9 @@ prompt_resource_and_vm_basics() {
   VM_NAME_DEFAULT="server-vm"
   VM_USER_DEFAULT="$CURRENT_USER"
   VM_HOSTNAME_DEFAULT="ubuntu-server"
-  VM_VCPUS_DEFAULT="14"
-  VM_RAM_GB_DEFAULT="8"
+  VM_VCPUS_DEFAULT="${SUGGESTED_VM_VCPUS:-14}"
+  VM_RAM_GB_DEFAULT="$(( ${SUGGESTED_VM_RAM_MB:-8192} / 1024 ))"
+  [ "$VM_RAM_GB_DEFAULT" -lt 4 ] && VM_RAM_GB_DEFAULT=4
   VM_DISK_GB_DEFAULT="32"
 
   VM_VCPUS_MAX=$(( TOTAL_THREADS > 2 ? TOTAL_THREADS - 2 : TOTAL_THREADS ))
@@ -555,8 +665,10 @@ main() {
   [ "$EUID" -ne 0 ] && { warn "Re-running with sudo..."; exec sudo bash "$0" "$@"; }
   detect_os
   detect_user
+  detect_system
+  check_requirements
 
-  confirm "Proceed with Phase 2 setup?" || exit 0
+  confirm "Proceed with Phase 2 VM setup?" || exit 0
   prompt_resource_and_vm_basics
   prompt_disk_path
   prompt_iso

@@ -43,6 +43,111 @@ detect_user() {
   info "Target user: $CURRENT_USER (home: $USER_HOME)"
 }
 
+# ─── System detection + requirements ─────────────────────────────────────────
+detect_system() {
+  SYS_CPU="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs)"
+  SYS_RAM="$(free -h 2>/dev/null | awk '/^Mem/{print $2}')"
+  SYS_KERNEL="$(uname -r)"
+  SYS_IGPU="$(lspci 2>/dev/null | grep -i 'vga\|display' | grep -i intel | head -1 | sed 's/.*: //')"
+  SYS_DGPU="$(lspci 2>/dev/null | grep -i 'vga\|display' | grep -iv intel | head -1 | sed 's/.*: //')"
+  SYS_DISKS="$(lsblk -d -o NAME,SIZE,MODEL --noheadings 2>/dev/null | grep -v loop | awk '{printf "%s %s %s  ", $1,$2,$3}')"
+  SYS_BOOT_MODE="$( [ -d /sys/firmware/efi ] && echo 'UEFI ✓' || echo 'Legacy/CSM ✗ (set UEFI-only in BIOS!)')"
+
+  # Detect Intel CPU gen from model name (rough heuristic)
+  SYS_CPU_GEN=""
+  if echo "$SYS_CPU" | grep -qiE 'i[3579]-12[0-9]{3}|i[3579]-1[23][0-9]{3}H'; then
+    SYS_CPU_GEN="12th gen Alder Lake (Iris Xe)"
+  elif echo "$SYS_CPU" | grep -qiE 'i[3579]-13[0-9]{3}'; then
+    SYS_CPU_GEN="13th gen Raptor Lake"
+  elif echo "$SYS_CPU" | grep -qiE 'i[3579]-14[0-9]{3}'; then
+    SYS_CPU_GEN="14th gen Raptor Lake Refresh"
+  elif echo "$SYS_CPU" | grep -qiE 'i[3579]-1[01][0-9]{3}'; then
+    SYS_CPU_GEN="10th/11th gen (Ice/Tiger Lake)"
+  fi
+
+  SYS_VTXD="$( dmesg 2>/dev/null | grep -qiE 'DMAR|IOMMU.*enabled|iommu: enabling' \
+    && echo 'VT-d detected in dmesg ✓' \
+    || echo 'VT-d not yet visible (enable in BIOS, set IOMMU kernel args)')"
+
+  section "System Information"
+  echo "  CPU     : ${SYS_CPU} ${SYS_CPU_GEN:+(${SYS_CPU_GEN})}"
+  echo "  RAM     : ${SYS_RAM}"
+  echo "  iGPU    : ${SYS_IGPU:-not detected}"
+  [ -n "${SYS_DGPU}" ] && echo "  dGPU    : ${SYS_DGPU}"
+  echo "  Storage : ${SYS_DISKS}"
+  echo "  Kernel  : ${SYS_KERNEL}"
+  echo "  Boot    : ${SYS_BOOT_MODE}"
+  echo "  IOMMU   : ${SYS_VTXD}"
+}
+
+check_requirements() {
+  section "Requirements Check"
+  echo "  Per LongQT-sea/intel-igpu-passthru + Rev5.7.2 guide:"
+  echo ""
+
+  local ok_count=0 warn_count=0
+
+  # UEFI boot
+  if [ -d /sys/firmware/efi ]; then
+    echo -e "  ${GREEN}✓${RESET} UEFI boot mode"
+    ok_count=$((ok_count+1))
+  else
+    echo -e "  ${YELLOW}✗${RESET} Legacy/CSM boot detected — BIOS: enable UEFI-only, disable Legacy/CSM"
+    warn_count=$((warn_count+1))
+  fi
+
+  # Kernel version ≥ 6.8
+  KVER_MAJOR="$(uname -r | cut -d. -f1)"
+  KVER_MINOR="$(uname -r | cut -d. -f2)"
+  if [ "$KVER_MAJOR" -gt 6 ] || { [ "$KVER_MAJOR" -eq 6 ] && [ "$KVER_MINOR" -ge 8 ]; }; then
+    echo -e "  ${GREEN}✓${RESET} Kernel $(uname -r) ≥ 6.8"
+    ok_count=$((ok_count+1))
+  else
+    echo -e "  ${YELLOW}✗${RESET} Kernel $(uname -r) < 6.8 — SR-IOV requires kernel 6.8+"
+    warn_count=$((warn_count+1))
+  fi
+
+  # Intel iGPU present
+  if lspci 2>/dev/null | grep -qi 'vga\|display' | grep -qi intel 2>/dev/null; then
+    echo -e "  ${GREEN}✓${RESET} Intel iGPU detected"
+    ok_count=$((ok_count+1))
+  elif lspci 2>/dev/null | grep -iE 'VGA|Display' | grep -qi intel; then
+    echo -e "  ${GREEN}✓${RESET} Intel iGPU detected"
+    ok_count=$((ok_count+1))
+  else
+    echo -e "  ${YELLOW}✗${RESET} No Intel iGPU detected — ensure 'Primary Display = iGPU' in BIOS"
+    warn_count=$((warn_count+1))
+  fi
+
+  # VT-d / IOMMU check
+  if dmesg 2>/dev/null | grep -qiE 'DMAR|IOMMU.*enabled|iommu: enabling'; then
+    echo -e "  ${GREEN}✓${RESET} VT-d/IOMMU active in kernel log"
+    ok_count=$((ok_count+1))
+  else
+    echo -e "  ${YELLOW}!${RESET} VT-d not confirmed — BIOS: enable 'Intel VT-d (Virtualization for Directed I/O)'"
+    warn_count=$((warn_count+1))
+  fi
+
+  echo ""
+  echo "  Required BIOS/UEFI settings:"
+  echo "    • UEFI-only boot (disable Legacy/CSM)"
+  echo "    • VGA OpROM = UEFI"
+  echo "    • Intel VT-d (IOMMU) = Enabled"
+  echo "    • Initial/Primary display = IGD / iGPU / Integrated"
+  echo ""
+  echo "  VM requirements (handled by phase2/3):"
+  echo "    • OVMF/UEFI firmware for guest"
+  echo "    • Guest headless: SSH + Cloudflare tunnel via phase3.sh"
+  echo ""
+
+  if [ "$warn_count" -gt 0 ]; then
+    warn "${warn_count} requirement(s) not met — review BIOS settings before running phase2."
+    confirm "Continue anyway?" || { echo "Aborted. Fix BIOS settings and re-run."; exit 0; }
+  else
+    ok "All requirements met."
+  fi
+}
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 confirm() { ask "$1 [Y/n]: "; read -r r; [[ "${r:-Y}" =~ ^[Yy]$ ]]; }
 
@@ -379,13 +484,14 @@ EOF
   sudo tee /etc/systemd/system/cloudflared.service > /dev/null << EOF
 [Unit]
 Description=Cloudflare Tunnel — ${TUNNEL_NAME}
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=${CURRENT_USER}
 ExecStart=/usr/bin/cloudflared --no-autoupdate --config ${USER_HOME}/.cloudflared/config.yml tunnel run
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
@@ -424,11 +530,16 @@ print_final_summary() {
   echo ""
   echo -e "${YELLOW}⚠  REBOOT REQUIRED to activate: IOMMU + SR-IOV + docker/libvirt groups${RESET}"
   echo ""
+  echo -e "${BOLD}  Auto-start on boot (no login required):${RESET}"
+  echo "    sshd      — enabled (systemd, starts before login)"
+  echo "    cloudflared — enabled, After=network-online.target (auto-reconnects tunnel)"
+  echo "    → After sudo reboot, SSH from phone reconnects automatically once network is up."
+  echo ""
   echo "  After reboot verify:"
   echo "    cat /proc/cmdline | grep iommu           # → intel_iommu=on iommu=pt"
   echo "    cat /proc/cmdline | grep i915            # → i915.enable_guc=3 i915.max_vfs=7"
   echo "    lspci -nnk -s 00:02 | grep 'driver in use'  # → i915 on PF, vfio-pci on VFs"
-  echo "    ls /dev/dri/                             # → only card0/renderD128 (no VF render nodes)"
+  echo "    ls /dev/dri/                             # → card0/renderD128 (no VF render nodes yet)"
   echo "    docker run --rm hello-world"
   echo "    systemctl status cloudflared"
   echo ""
@@ -451,6 +562,8 @@ main() {
 
   detect_os
   detect_user
+  detect_system
+  check_requirements
 
   echo ""
   info "Steps: packages → IOMMU → sleep → static IP → SSH → Cloudflare tunnel"
