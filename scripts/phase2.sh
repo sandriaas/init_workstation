@@ -957,7 +957,7 @@ create_vm() {
       --video "${VM_VIDEO:-none}" \
       --console "${VM_CONSOLE:-pty,target_type=serial}" \
       --location "${iso_path},kernel=casper/vmlinuz,initrd=casper/initrd" \
-      --extra-args "autoinstall" \
+      --extra-args "autoinstall ds=nocloud" \
       ${cloud_init_arg} \
       --noautoconsole; then
       err "virt-install failed! Check the error above."
