@@ -1247,6 +1247,7 @@ select_or_create_conf() {
     (( i++ )) || true
     done
   fi
+  echo -e "    ${BOLD}$i)${RESET} Create new VM"
   echo ""
   local default_choice="$i"
   if [ -n "${LAST_VM_CONF:-}" ] && [ ${#EXISTING[@]} -gt 0 ]; then
