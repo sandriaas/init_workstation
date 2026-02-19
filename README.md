@@ -34,6 +34,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/m
 git clone https://github.com/sandriaas/init_workstation.git
 cd init_workstation
 
+# Verify system state at any time (read-only, no changes)
+bash scripts/check.sh
+
 # Phase 1
 sudo bash scripts/phase1.sh
 
