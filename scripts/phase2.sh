@@ -459,6 +459,7 @@ GPU_ROM_FILE="${GPU_ROM_FILE}"
 GPU_ROM_URL="${GPU_ROM_URL}"
 GPU_ROM_PATH="${GPU_ROM_DEST:-/usr/share/kvm/igd.rom}"
 GPU_IGD_LPC="${GPU_IGD_LPC}"
+KERNEL_GPU_ARGS="${KERNEL_GPU_ARGS}"
 
 HOST_TUNNEL_DOMAIN="${HOST_TUNNEL_DOMAIN}"
 HOST_TUNNEL_HOST="${HOST_TUNNEL_HOST}"
@@ -475,7 +476,8 @@ source_vm_conf() {
 }
 
 install_sriov_host() {
-  [ "${GPU_PASSTHROUGH}" = "yes" ] || return 0
+  [ "${GPU_PASSTHROUGH:-yes}" = "yes" ] || return 0
+  source_vm_conf  # ensure all vm.conf vars (incl. KERNEL_GPU_ARGS) are loaded
   section "Host SR-IOV Setup (${GPU_DRIVER})"
 
   # Guide warning: remove disable_vga=1 if present (breaks IGD passthrough)
