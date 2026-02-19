@@ -126,7 +126,7 @@ select_conf() {
       [ "${name}" = "${LAST_VM_NAME:-}" ] && { mark=" ${YELLOW}← last used${RESET}"; default_idx=$idx; }
       echo -e "    ${BOLD}${idx})${RESET} ${name}  (${state})${conf_hint}${mark}"
       CHOICES+=("$name"); CONF_MAP+=("$conf_file")
-      (( idx++ )); (( v++ ))
+      (( idx++ )) || true; (( v++ )) || true
     done
   fi
 
@@ -141,7 +141,7 @@ select_conf() {
       if [ $already -eq 0 ]; then
         echo -e "    ${BOLD}${idx})${RESET} ${fn}  ${YELLOW}(conf only — not yet installed)${RESET}"
         CHOICES+=("$fn"); CONF_MAP+=("$f")
-        (( idx++ ))
+        (( idx++ )) || true
       fi
     done
   fi
@@ -296,7 +296,7 @@ wait_for_ssh() {
       ok "VM SSH reachable at ${VM_SSH_HOST}"
       return
     fi
-    (( attempts++ ))
+    (( attempts++ )) || true
     if (( attempts % 12 == 0 )); then
       local elapsed=$(( attempts * 5 / 60 ))
       local vm_state; vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
@@ -523,7 +523,7 @@ test_cf_tunnel() {
       ok "Cloudflared SSH tunnel test passed: ssh ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
       return
     fi
-    (( attempts++ ))
+    (( attempts++ )) || true
     sleep 5
   done
   CF_TUNNEL_RESULT="not reachable yet (tunnel may need a minute to propagate DNS)"

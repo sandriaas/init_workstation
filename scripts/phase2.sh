@@ -1082,7 +1082,7 @@ test_vm_ssh() {
       echo "VM_SSH_IP=\"${cur_ip}\"" >> "$state"
       return
     fi
-    (( attempts++ ))
+    (( attempts++ )) || true
     if (( attempts % 12 == 0 )); then
       local elapsed=$(( attempts * 5 / 60 ))
       local vm_state; vm_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
@@ -1244,17 +1244,16 @@ select_or_create_conf() {
     [ -n "${_ip}" ] && details="${details:+${details} / }${_ip}"
     local mark=""; [ "${f}" = "${LAST_VM_CONF:-}" ] && mark=" ${YELLOW}← last used${RESET}"
     echo -e "    ${BOLD}$i)${RESET} ${nm}${details:+  (${details})}${mark}"
-    (( i++ ))
+    (( i++ )) || true
     done
   fi
-  echo -e "    ${BOLD}$i)${RESET} Create new VM"
   echo ""
   local default_choice="$i"
   if [ -n "${LAST_VM_CONF:-}" ] && [ ${#EXISTING[@]} -gt 0 ]; then
     local j=1
     for f in "${EXISTING[@]}"; do
       [ "$f" = "$LAST_VM_CONF" ] && default_choice=$j
-      (( j++ ))
+      (( j++ )) || true
     done
   fi
   ask "Select configuration [1-$i, default=${default_choice}]: "; read -r _sel
