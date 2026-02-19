@@ -354,7 +354,7 @@ step() { echo -e "\n${BOLD}  ── $* ──${RESET}"; }
 # ── Step 3: Install packages ────────────────────────────────────────────────
 step "Step 3: Install base packages"
 if command -v apt-get >/dev/null 2>&1; then
-  apt-get update -qq
+  apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     curl wget openssh-server fail2ban net-tools \
     dkms "linux-headers-$(uname -r)" build-essential
@@ -368,11 +368,11 @@ ok "Packages installed."
 
 # ── Step 4: SSH + fail2ban ──────────────────────────────────────────────────
 step "Step 4: Configure SSH + fail2ban"
-systemctl enable --now sshd 2>/dev/null || systemctl enable --now ssh 2>/dev/null || true
-systemctl enable --now fail2ban 2>/dev/null || true
+systemctl enable --now sshd || systemctl enable --now ssh || true
+systemctl enable --now fail2ban || true
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
 sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
-systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+systemctl reload sshd || systemctl reload ssh || true
 ok "SSH enabled. fail2ban enabled."
 
 # ── Step 5: Static IP via netplan ───────────────────────────────────────────
@@ -405,7 +405,7 @@ if ! grep -q "${SHARED_TAG}" /etc/fstab; then
   echo "${SHARED_TAG} /mnt/${SHARED_TAG} virtiofs defaults,_netdev 0 0" >> /etc/fstab
   ok "Added ${SHARED_TAG} to /etc/fstab"
 fi
-mount -a 2>/dev/null || warn "virtiofs mount failed — will succeed after host reboot."
+mount -a || warn "virtiofs mount failed — will succeed after host reboot."
 
 # ── Step 7: i915-sriov-dkms in guest ───────────────────────────────────────
 step "Step 7: Install i915-sriov-dkms in guest"
@@ -436,7 +436,7 @@ if ! command -v cloudflared >/dev/null 2>&1; then
     echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] \
 https://pkg.cloudflare.com/cloudflared $(. /etc/os-release; echo "${VERSION_CODENAME:-jammy}") main" \
       | tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
-    apt-get update -qq && apt-get install -y cloudflared
+    apt-get update && apt-get install -y cloudflared
   elif command -v dnf >/dev/null 2>&1; then
     curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-x86_64.rpm \
       -o /tmp/cloudflared.rpm && rpm -i /tmp/cloudflared.rpm || true
@@ -459,8 +459,8 @@ CHOICE="${CHOICE:-1}"
 
 if [ "$CHOICE" = "2" ]; then
   cloudflared login
-  cloudflared tunnel create "${VM_TUNNEL_NAME}" 2>/dev/null || true
-  cloudflared tunnel route dns "${VM_TUNNEL_NAME}" "${VM_TUNNEL_HOST}" 2>/dev/null || true
+  cloudflared tunnel create "${VM_TUNNEL_NAME}" || true
+  cloudflared tunnel route dns "${VM_TUNNEL_NAME}" "${VM_TUNNEL_HOST}" || true
   mkdir -p /root/.cloudflared
   TUNNEL_ID="$(cloudflared tunnel list 2>/dev/null | awk -v n="${VM_TUNNEL_NAME}" '$2==n{print $1; exit}')"
   if [ -n "${TUNNEL_ID:-}" ]; then
@@ -487,7 +487,7 @@ else
   fi
 fi
 
-systemctl enable --now cloudflared 2>/dev/null || true
+systemctl enable --now cloudflared || true
 
 echo ""
 ok "VM internal configuration complete."
