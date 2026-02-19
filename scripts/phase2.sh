@@ -965,6 +965,9 @@ print_summary() {
   echo "                               └──virbr0 NAT──▶ VM ($VM_IP)"
   echo "                                    VM tunnel: ${VM_TUNNEL_HOST}"
   echo ""
+  echo -e "${BOLD}  ── VM Status ────────────────────────────────────────────────${RESET}"
+  virsh list --all 2>/dev/null | sed 's/^/  /' || true
+  echo ""
   echo -e "${YELLOW}  ── Next Steps ───────────────────────────────────────────────${RESET}"
   if [ "${VM_AUTOINSTALL:-yes}" = "yes" ]; then
     echo "  Ubuntu is installing AUTOMATICALLY (unattended, ~10-15 min)."
