@@ -138,7 +138,7 @@ check_requirements() {
     VF_COUNT="$(ls /sys/bus/pci/devices/0000:00:02.0/virtfn* 2>/dev/null | wc -l)"
     echo -e "  ${GREEN}✓${RESET} SR-IOV VFs active: ${VF_COUNT} VF(s) on 0000:00:02.0"
   else
-    echo -e "  ${YELLOW}!${RESET} SR-IOV VFs not yet active — run phase1 (step 7) + reboot first"
+    echo -e "  ${YELLOW}!${RESET} SR-IOV VFs not yet active — run phase1 (step 6) + reboot first"
   fi
 
   echo ""
@@ -179,7 +179,7 @@ detect_host_tunnel() {
 }
 
 prompt_resource_and_vm_basics() {
-  section "Step 0: VM Resources"
+  section "Step 1: VM Resources (RAM + CPU)"
   TOTAL_THREADS="$(nproc)"
   TOTAL_RAM_GB="$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)"
 
@@ -214,7 +214,7 @@ prompt_resource_and_vm_basics() {
 }
 
 prompt_disk_path() {
-  section "Step 1: VM Disk Location"
+  section "Step 2: VM Disk Location"
   echo "  1) /var/lib/libvirt/images/  (default libvirt)"
   echo "  2) /var/lib/qemu/            (QEMU directory)"
   echo "  3) Enter custom directory"
@@ -229,7 +229,7 @@ prompt_disk_path() {
 }
 
 prompt_iso() {
-  section "Step 2: Ubuntu ISO"
+  section "Step 3: Ubuntu ISO"
   VM_OS_VARIANT="ubuntu24.04"
   VM_ISO_URL="https://releases.ubuntu.com/24.04.3/ubuntu-24.04.3-live-server-amd64.iso"
   VM_ISO_PATH_DEFAULT="${USER_HOME}/iso/ubuntu-24.04.3-live-server-amd64.iso"
@@ -268,7 +268,7 @@ prompt_iso() {
 }
 
 prompt_network_and_share() {
-  section "Step 3: Network + Shared Dir"
+  section "Step 4: Network + Shared Folder"
   VM_STATIC_IP_DEFAULT="192.168.122.50/24"
   VM_GATEWAY_DEFAULT="192.168.122.1"
   VM_DNS_DEFAULT="1.1.1.1,8.8.8.8"
@@ -289,7 +289,7 @@ prompt_network_and_share() {
 }
 
 prompt_gpu() {
-  section "Step 4: Intel iGPU SR-IOV"
+  section "Step 5: Intel iGPU — Gen + ROM"
   echo "Select Intel CPU generation:"
   echo "  1   Sandy Bridge     (2nd)          Core i3/5/7 2xxx"
   echo "  2   Ivy Bridge       (3rd)          Core i3/5/7 3xxx"
@@ -371,7 +371,7 @@ prompt_gpu() {
 
 prompt_rom() {
   [ "${GPU_PASSTHROUGH:-yes}" = "yes" ] || return 0
-  section "Step 4b: Intel iGPU ROM File (OpROM/VBIOS)"
+  section "Step 5b: iGPU ROM File (OpROM/VBIOS)"
   GPU_ROM_DEST="/usr/share/kvm/igd.rom"
   info "ROM for your generation: ${GPU_ROM_FILE}"
   info "  Source: ${GPU_ROM_URL}"
@@ -403,7 +403,7 @@ prompt_rom() {
 }
 
 prompt_tunnel() {
-  section "Step 5: Tunnel Domain"
+  section "Step 6: VM Tunnel Domain"
   detect_host_tunnel
   if [ -n "$HOST_TUNNEL_HOST" ]; then
     info "Detected host tunnel: ${HOST_TUNNEL_HOST}"

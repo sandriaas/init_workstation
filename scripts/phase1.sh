@@ -253,71 +253,13 @@ step_packages() {
 }
 
 # =============================================================================
-# STEP 2: IOMMU — Intel VT-d (KVM passthrough)
-# =============================================================================
-step_iommu() {
-  section "Step 2: IOMMU Kernel Parameters"
-  IOMMU_ARGS="intel_iommu=on iommu=pt i915.enable_guc=3 i915.max_vfs=7 module_blacklist=xe"
 
-  # Skip only if full parameter set is active in running kernel
-  if grep -q "intel_iommu=on" /proc/cmdline 2>/dev/null && grep -q "i915.max_vfs=" /proc/cmdline 2>/dev/null; then
-    ok "IOMMU + SR-IOV args already active in running kernel. Skipping."; return
-  fi
-
-  confirm "Enable IOMMU + Intel SR-IOV args in bootloader?" || { info "Skipped."; return; }
-
-  if [ -f /etc/default/limine ]; then
-    info "Bootloader: Limine (CachyOS)"
-    # Skip sed if already patched — prevents double-patch on re-run
-    if grep -q "i915.max_vfs=" /etc/default/limine; then
-      ok "Already patched in /etc/default/limine — regenerating bootloader only..."
-    else
-      sudo cp /etc/default/limine /etc/default/limine.bak
-      # Patch ALL KERNEL_CMDLINE entries (default + any named kernels e.g. lts, zen, hardened)
-      sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${IOMMU_ARGS}\"/g" /etc/default/limine
-    fi
-    sudo limine-update
-    ok "Limine updated — applied to all kernel entries. Active after reboot."
-
-  elif [ -f /etc/default/grub ]; then
-    info "Bootloader: GRUB"
-    if grep -q "i915.max_vfs=" /etc/default/grub; then
-      ok "Already patched in /etc/default/grub — regenerating only..."
-    else
-      sudo cp /etc/default/grub /etc/default/grub.bak
-      sudo sed -i "s/\\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\\)\"/\\1 ${IOMMU_ARGS}\"/" /etc/default/grub
-    fi
-    case $OS in
-      arch)           sudo grub-mkconfig -o /boot/grub/grub.cfg ;;
-      ubuntu|proxmox) sudo update-grub ;;
-      fedora)         sudo grub2-mkconfig -o /boot/grub2/grub.cfg ;;
-    esac
-    ok "GRUB updated. Active after reboot."
-
-  elif [ -d /boot/loader/entries ]; then
-    # Patch all entry .conf files in /boot/loader/entries/
-    info "Bootloader: systemd-boot — patching all entries..."
-    for entry in /boot/loader/entries/*.conf; do
-      if grep -q "i915.max_vfs=" "$entry" 2>/dev/null; then
-        ok "Already patched: $entry"
-      else
-         sudo sed -i "s/\\(options.*\\)/\\1 ${IOMMU_ARGS}/" "$entry"
-        ok "Patched: $entry"
-      fi
-    done
-
-  else
-    warn "Unknown bootloader — add '${IOMMU_ARGS}' to kernel cmdline manually."
-  fi
-
-  info "Verify after reboot: cat /proc/cmdline | grep iommu"
-}
 
 # =============================================================================
-# STEP 3: Disable System Sleep
+# STEP 2: Disable System Sleep
 # =============================================================================
 step_sleep() {
-  section "Step 3: Disable System Sleep"
+  section "Step 2: Disable System Sleep"
 
   if systemctl is-masked sleep.target &>/dev/null; then
     ok "Sleep targets already masked. Skipping."; return
@@ -329,10 +271,10 @@ step_sleep() {
 }
 
 # =============================================================================
-# STEP 4: Static IP
+# STEP 3: Static IP
 # =============================================================================
 step_static_ip() {
-  section "Step 4: Static IP"
+  section "Step 3: Static IP"
 
   IFACE=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
   CURRENT_IP=$(ip addr show "$IFACE" 2>/dev/null | awk '/inet /{print $2}' | head -1)
@@ -394,10 +336,10 @@ EOF
 }
 
 # =============================================================================
-# STEP 5: SSH Hardening
+# STEP 4: SSH
 # =============================================================================
 step_ssh() {
-  section "Step 5: SSH Setup"
+  section "Step 4: SSH Setup"
 
   if ! systemctl is-active sshd &>/dev/null && ! systemctl is-active ssh &>/dev/null; then
     warn "sshd not running — was it enabled in Step 1?"; return
@@ -413,10 +355,10 @@ step_ssh() {
 }
 
 # =============================================================================
-# STEP 6: Cloudflare SSH Tunnel
+# STEP 5: Cloudflare SSH Tunnel
 # =============================================================================
 step_cloudflare_tunnel() {
-  section "Step 6: Cloudflare SSH Tunnel"
+  section "Step 5: Cloudflare SSH Tunnel"
 
   if systemctl is-active cloudflared &>/dev/null; then
     ok "cloudflared already active. Skipping."; return
@@ -515,10 +457,10 @@ EOF
 
 
 # =============================================================================
-# STEP 7: SR-IOV Host Setup (GPU gen selection + dkms + kernel args)
+# STEP 6: Intel iGPU SR-IOV + IOMMU (GPU gen, dkms, kernel args, bootloader)
 # =============================================================================
 step_sriov_host() {
-  section "Step 7: Intel iGPU SR-IOV Host Setup"
+  section "Step 6: Intel iGPU SR-IOV + IOMMU"
 
   # Load existing vm.conf if already done
   [ -f "$VM_CONF" ] && source "$VM_CONF" 2>/dev/null || true
@@ -743,11 +685,10 @@ main() {
   check_requirements
 
   echo ""
-  info "Steps: packages → IOMMU → sleep → static IP → SSH → Cloudflare tunnel → SR-IOV"
+  info "Steps: packages → sleep → static IP → SSH → Cloudflare tunnel → iGPU SR-IOV+IOMMU"
   confirm "Proceed with Phase 1 setup?" || { echo "Aborted."; exit 0; }
 
   step_packages
-  step_iommu
   step_sleep
   step_static_ip
   step_ssh
