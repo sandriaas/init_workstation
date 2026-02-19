@@ -51,7 +51,8 @@ function Install-Websocat {
     $dest = "$binDir\websocat.exe"
     # Resolve actual asset URL via API (avoids redirect issues in PS 5.1)
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/vi/websocat/releases/latest" -UseBasicParsing
-    $asset   = $release.assets | Where-Object { $_.name -like "*x86_64*windows*msvc*" }
+    $asset   = $release.assets | Where-Object { $_.name -like "websocat.x86_64*windows*.exe" } | Select-Object -First 1
+    if (-not $asset) { $asset = $release.assets | Where-Object { $_.name -like "*windows*.exe" } | Select-Object -First 1 }
     $url     = $asset.browser_download_url
     Info "Downloading websocat from $url ..."
     (New-Object System.Net.WebClient).DownloadFile($url, $dest)
