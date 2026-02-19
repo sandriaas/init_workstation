@@ -1445,6 +1445,45 @@ main() {
   SKIP_PROMPTS="no"
   select_or_create_conf
 
+  # ── Early SSH check: if VM already running + SSH works, skip install ─────────
+  if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+    local _early_state; _early_state="$(virsh domstate "$VM_NAME" 2>/dev/null || echo unknown)"
+    local _early_ip="${VM_STATIC_IP%/*}"
+    local _dhcp_ip; _dhcp_ip="$(virsh domifaddr "$VM_NAME" 2>/dev/null \
+      | awk '/ipv4/{print $4}' | cut -d/ -f1 | head -1 || true)"
+    local _check_ip="${_dhcp_ip:-$_early_ip}"
+    echo ""
+    info "VM '${VM_NAME}' already exists (state: ${_early_state}). Checking SSH..."
+    if [ "$_early_state" = "running" ] && \
+       ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes \
+           "${VM_USER}@${_check_ip}" true 2>/dev/null; then
+      ok "VM SSH reachable at ${VM_USER}@${_check_ip} — skipping install."
+      VM_SSH_RESULT="✓  ${VM_USER}@${_check_ip}"
+      VM_SSH_IP="$_check_ip"
+      print_summary
+      exit 0
+    else
+      warn "VM exists but SSH not reachable (state: ${_early_state}, ip: ${_check_ip})."
+      echo ""
+      echo "  1) Continue (re-run provisioning steps)"
+      echo "  2) Destroy + recreate VM from scratch"
+      echo "  3) Exit"
+      ask "Choice [1/2/3, default=1]: "; read -r _exist_choice
+      case "${_exist_choice:-1}" in
+        2)
+          info "Destroying ${VM_NAME}..."
+          sudo virsh destroy "$VM_NAME" 2>/dev/null || true
+          sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null \
+            || sudo virsh undefine "$VM_NAME" 2>/dev/null || true
+          sudo rm -f "${VM_DISK_PATH}" "/var/lib/libvirt/images/${VM_NAME}-seed.iso" 2>/dev/null || true
+          ok "VM destroyed. Proceeding with fresh install."
+          ;;
+        3) exit 0 ;;
+        *) info "Continuing with existing VM..." ;;
+      esac
+    fi
+  fi
+
   confirm "Proceed with Phase 2 VM setup?" || exit 0
 
   _snap_pre "phase2 vm provision start"
