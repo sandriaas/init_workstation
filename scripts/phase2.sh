@@ -1176,7 +1176,20 @@ test_vm_ssh() {
   local max=60   # 5 min — cloud-init takes ~2 min, allow buffer for slow boot
   info "Polling SSH at ${VM_USER}@${vm_ip} (up to ~5 min)..."
   info "cloud-init configures on first boot then reboots — SSH appears after reboot."
-  info "Watch console:  sudo virsh console ${VM_NAME}  (Ctrl+] to exit)"
+
+  # Stream serial console via PTY device (--serial pty → /dev/pts/N)
+  local console_pid=""
+  local pty_dev
+  pty_dev="$(sudo virsh dumpxml "${VM_NAME}" 2>/dev/null \
+    | sed -n "/<serial type='pty'>/,/<\/serial>/p" \
+    | grep -oP "(?<=path=')[^']+" | head -1 || true)"
+  if [ -n "${pty_dev:-}" ] && sudo test -c "${pty_dev}" 2>/dev/null; then
+    echo "── VM console output (${pty_dev}) ────────────────────────"
+    sudo cat "${pty_dev}" 2>/dev/null &
+    console_pid=$!
+  else
+    info "Console: sudo virsh console ${VM_NAME}  (Ctrl+] to exit)"
+  fi
 
   local attempts=0
   while [ $attempts -lt $max ]; do
@@ -1200,6 +1213,7 @@ test_vm_ssh() {
     if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=3 -o BatchMode=yes \
            "${VM_USER}@${cur_ip}" true 2>/dev/null; then
       echo ""
+      [ -n "$console_pid" ] && { kill "$console_pid" 2>/dev/null; echo "──────────────────────────────────────────────────────────"; }
       VM_SSH_IP="$cur_ip"
       VM_SSH_RESULT="✓  ${VM_USER}@${cur_ip}"
       ok "VM SSH confirmed: ssh ${VM_USER}@${cur_ip}"
@@ -1214,11 +1228,13 @@ test_vm_ssh() {
       local elapsed=$(( attempts * 5 / 60 ))
       printf "\r  [%d min] VM state: %-12s  waiting for SSH...    " "$elapsed" "$vm_state"
     else
-      printf "\r  [VM: %-10s]  Waiting for SSH... (%d/%d)    " "$vm_state" "$attempts" "$max"
+      [ -z "$console_pid" ] && \
+        printf "\r  [VM: %-10s]  Waiting for SSH... (%d/%d)    " "$vm_state" "$attempts" "$max"
     fi
     sleep 5
   done
   echo ""
+  [ -n "$console_pid" ] && kill "$console_pid" 2>/dev/null || true
   VM_SSH_IP="$vm_ip"
   VM_SSH_RESULT="not yet reachable (check with: virsh console ${VM_NAME})"
   warn "VM SSH not confirmed after $(( max * 5 / 60 )) min — Phase 3 will retry automatically."
