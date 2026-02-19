@@ -899,6 +899,29 @@ create_vm() {
   sudo virsh net-autostart default >/dev/null 2>&1 || true
   sudo virsh net-start default >/dev/null 2>&1 || true
 
+  # ── Ensure ISOs are readable by libvirt-qemu ──────────────────────────────
+  # libvirt-qemu needs execute on every directory in the path and read on files.
+  # Safest fix: copy ISOs under /var/lib/libvirt/images/ which is always accessible.
+  _ensure_libvirt_readable() {
+    local src="$1"
+    [ -f "$src" ] || return 0
+    # Check if it's already under a libvirt-accessible path
+    if echo "$src" | grep -qE "^/var/lib/libvirt|^/tmp|^/root"; then
+      return 0
+    fi
+    local dest="/var/lib/libvirt/images/$(basename "$src")"
+    if [ ! -f "$dest" ]; then
+      info "Copying $(basename "$src") → ${dest}  (libvirt-qemu needs access)"
+      sudo cp "$src" "$dest"
+      sudo chmod 644 "$dest"
+    fi
+    echo "$dest"
+  }
+
+  local iso_path="$VM_ISO_PATH"
+  local new_path; new_path="$(_ensure_libvirt_readable "$iso_path")"
+  [ -n "${new_path:-}" ] && [ "$new_path" != "$iso_path" ] && iso_path="$new_path"
+
   if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     ok "VM '${VM_NAME}' already exists. Skipping virt-install."
   else
@@ -908,9 +931,11 @@ create_vm() {
       generate_autoinstall
       create_seed_iso
       source_vm_conf  # reload to pick up VM_SEED_ISO
-      seed_disk_arg="--disk path=${VM_SEED_ISO},device=cdrom,readonly=on,format=raw"
-      # Ubuntu 24.04 server: kernel/initrd live at casper/ in the ISO
-      # autoinstall + ds=nocloud picks up seed ISO labeled 'cidata'
+      # Ensure seed ISO accessible too
+      local seed_path="$VM_SEED_ISO"
+      local new_seed; new_seed="$(_ensure_libvirt_readable "$seed_path")"
+      [ -n "${new_seed:-}" ] && [ "$new_seed" != "$seed_path" ] && seed_path="$new_seed"
+      seed_disk_arg="--disk path=${seed_path},device=cdrom,readonly=on,format=raw"
       extra_args="autoinstall ds=nocloud;s=/cidata/ console=ttyS0,115200n8 quiet ---"
       info "Ubuntu autoinstall enabled — installation will run unattended (~10-15 min)"
     fi
@@ -931,15 +956,18 @@ create_vm() {
       --graphics "${VM_GRAPHICS:-none}" \
       --video "${VM_VIDEO:-none}" \
       --console "${VM_CONSOLE:-pty,target_type=serial}" \
-      --location "${VM_ISO_PATH},kernel=casper/vmlinuz,initrd=casper/initrd" \
+      --location "${iso_path},kernel=casper/vmlinuz,initrd=casper/initrd" \
       ${seed_disk_arg} \
       ${extra_args:+--extra-args "$extra_args"} \
       --noautoconsole; then
       err "virt-install failed! Check the error above."
       err "Common fixes: missing OVMF firmware, invalid ISO path, or libvirtd not running."
-      err "  ISO path:   ${VM_ISO_PATH}"
+      err "  ISO path:   ${iso_path}"
       err "  Disk path:  ${VM_DISK_PATH}"
       err "  VM name:    ${VM_NAME}"
+      # Clean up partial disk so next run doesn't fail on existing file
+      [ -f "$VM_DISK_PATH" ] && sudo rm -f "$VM_DISK_PATH" && warn "Removed partial disk: ${VM_DISK_PATH}"
+      sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || sudo virsh undefine "$VM_NAME" 2>/dev/null || true
       return 1
     fi
 
