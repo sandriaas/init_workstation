@@ -43,8 +43,16 @@ function Install-Websocat {
     if (Get-Command websocat -ErrorAction SilentlyContinue) {
         Ok "websocat already installed"; return
     }
-    Info "Installing websocat via Scoop..."
-    scoop install websocat
+    Info "Installing websocat via Scoop (extras bucket)..."
+    scoop bucket add extras 2>$null
+    scoop install extras/websocat
+    # Refresh PATH so websocat is available in this session
+    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("PATH","User")
+    if (-not (Get-Command websocat -ErrorAction SilentlyContinue)) {
+        Warn "websocat not found in PATH after install — check Scoop output above"
+        exit 1
+    }
     Ok "websocat installed"
 }
 
@@ -82,7 +90,8 @@ function Setup-SshConfig {
     }
 
     # Resolve full path to websocat.exe for ProxyCommand
-    $websocat = (Get-Command websocat).Source
+    $websocat = (Get-Command websocat -ErrorAction SilentlyContinue)?.Source
+    if (-not $websocat) { $websocat = "$env:USERPROFILE\scoop\shims\websocat.exe" }
 
     $entry = @"
 
