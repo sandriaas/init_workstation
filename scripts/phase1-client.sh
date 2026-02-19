@@ -40,13 +40,14 @@ install_websocat() {
   info "Installing websocat..."
   case $ENV in
     arch)    sudo pacman -S --noconfirm --needed websocat ;;
-    ubuntu)  curl -sL https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl \
-               -o /usr/local/bin/websocat && chmod +x /usr/local/bin/websocat ;;
-    fedora)  sudo dnf install -y websocat ;;
+    ubuntu)  sudo curl -sL https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl \
+               -o /usr/local/bin/websocat && sudo chmod +x /usr/local/bin/websocat ;;
+    fedora)  sudo curl -sL https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl \
+               -o /usr/local/bin/websocat && sudo chmod +x /usr/local/bin/websocat ;;
     macos)   brew install websocat ;;
     termux)  pkg install -y websocat ;;
-    generic) curl -sL https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl \
-               -o /usr/local/bin/websocat && chmod +x /usr/local/bin/websocat ;;
+    generic) sudo curl -sL https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl \
+               -o /usr/local/bin/websocat && sudo chmod +x /usr/local/bin/websocat ;;
   esac
   ok "websocat installed"
 }
