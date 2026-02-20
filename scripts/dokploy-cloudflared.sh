@@ -343,8 +343,24 @@ setup_dokploy_tunnel() {
     [ -n "$DOKPLOY_CF_ZONE_ID" ] && DOKPLOY_CF_API_TOKEN="$_api_token"
   fi
   if [ -z "$DOKPLOY_CF_ZONE_ID" ]; then
-    warn "Could not fetch CF Zone ID — DNS auto-sync will be disabled."
-    warn "Ensure your API token has Zone:Read + DNS:Edit permissions."
+    echo ""
+    warn "DNS auto-sync needs a CF API token with Zone:Read + DNS:Edit permissions."
+    echo "  Create one at: https://dash.cloudflare.com/profile/api-tokens"
+    echo "  Use template: 'Edit zone DNS' → restrict to zone: ${CF_DOMAIN}"
+    echo ""
+    ask "  CF API token (or Enter to skip auto-sync):"; read -rs _tok; echo ""
+    if [ -n "$_tok" ]; then
+      DOKPLOY_CF_ZONE_ID=$(cf_fetch_zone_id "$_tok" "$CF_DOMAIN" || true)
+      if [ -n "$DOKPLOY_CF_ZONE_ID" ]; then
+        DOKPLOY_CF_API_TOKEN="$_tok"
+        cf_store_api_token "$_tok"
+        ok "CF Zone ID: ${DOKPLOY_CF_ZONE_ID}"
+      else
+        warn "Could not fetch Zone ID with that token — DNS auto-sync will be disabled."
+      fi
+    else
+      warn "Skipping DNS auto-sync — use 'add-domain' subcommand for manual CNAME creation."
+    fi
   else
     ok "CF Zone ID: ${DOKPLOY_CF_ZONE_ID}"
   fi
