@@ -173,7 +173,10 @@ select_conf() {
   fi
 
   # shellcheck source=/dev/null
+  # Temporarily disable nounset — conf file contains SHA-512 hash with $6$ literal
+  set +u
   source "$VM_CONF"
+  set -u
   VM_SSH_HOST="${VM_STATIC_IP%/*}"
   VM_SSH_USER="${VM_USER}"
 }
