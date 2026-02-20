@@ -950,14 +950,8 @@ generate_cloud_config() {
     pw_hash="$(openssl passwd -6 'changeme123' 2>/dev/null || echo 'changeme123')"
   fi
 
-  # Ensure SSH key exists for BatchMode SSH polling to work
-  local ssh_key_file="${HOME}/.ssh/id_ed25519"
-  if [ ! -f "${ssh_key_file}.pub" ]; then
-    info "Generating SSH key for VM access..."
-    ssh-keygen -t ed25519 -f "$ssh_key_file" -N "" -C "${CURRENT_USER}@host" >/dev/null 2>&1
-    ok "SSH key generated: ${ssh_key_file}.pub"
-  fi
-  local ssh_pubkey; ssh_pubkey="$(cat "${ssh_key_file}.pub" 2>/dev/null || true)"
+  # Ensure password-only auth — no SSH keys generated
+  # BatchMode SSH polling replaced with port checks below
 
   {
     printf '#cloud-config\n'
@@ -969,10 +963,6 @@ generate_cloud_config() {
     printf '    sudo: ALL=(ALL) NOPASSWD:ALL\n'
     printf '    shell: /bin/bash\n'
     printf '    groups: [adm, sudo]\n'
-    if [ -n "$ssh_pubkey" ]; then
-      printf '    ssh_authorized_keys:\n'
-      printf '      - %s\n' "${ssh_pubkey}"
-    fi
     printf 'ssh_pwauth: true\n'
     printf 'chpasswd:\n'
     printf '  expire: false\n'
@@ -1244,8 +1234,7 @@ test_vm_ssh() {
       | awk '/ipv4/{print $4}' | cut -d/ -f1 | head -1 || true)"
     [ -n "${dhcp:-}" ] && cur_ip="$dhcp"
 
-    if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -o BatchMode=yes \
-           "${VM_USER}@${cur_ip}" true 2>/dev/null; then
+    if timeout 3 bash -c "echo >/dev/tcp/${cur_ip}/22" 2>/dev/null; then
       echo ""
       [ -n "$console_pid" ] && { kill "$console_pid" 2>/dev/null; echo "──────────────────────────────────────────────────────────"; }
       VM_SSH_IP="$cur_ip"
@@ -1495,8 +1484,7 @@ main() {
     echo ""
     info "VM '${VM_NAME}' already exists (state: ${_early_state}). Checking SSH..."
     if [ "$_early_state" = "running" ] && \
-       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes \
-           "${VM_USER}@${_check_ip}" true 2>/dev/null; then
+       timeout 5 bash -c "echo >/dev/tcp/${_check_ip}/22" 2>/dev/null; then
       ok "VM SSH reachable at ${VM_USER}@${_check_ip}"
       VM_SSH_RESULT="✓  ${VM_USER}@${_check_ip}"
       VM_SSH_IP="$_check_ip"
