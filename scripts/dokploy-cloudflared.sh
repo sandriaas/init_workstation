@@ -373,32 +373,27 @@ cat > /etc/cloudflared-dokploy/config.yml <<CFCONFIG
 tunnel: ${DOKPLOY_TUNNEL_ID}
 credentials-file: /etc/cloudflared/creds.json
 ingress:
+  - hostname: "${_dash_sub}.${DOKPLOY_DOMAIN}"
+    service: http://localhost:3000
   - hostname: "*.${DOKPLOY_DOMAIN}"
-    service: http://dokploy-traefik:80
+    service: http://localhost:80
   - service: http_status:404
 CFCONFIG
-ok "cloudflared config written (all traffic → dokploy-traefik:80)"
+ok "cloudflared config: ${_dash_sub}.${DOKPLOY_DOMAIN} → :3000, *.${DOKPLOY_DOMAIN} → :80"
 
-# Wait for Dokploy to create dokploy-network (up to 90s)
-_tries=0
-info "Waiting for dokploy-network..."
-while [ $_tries -lt 18 ] && ! docker network ls 2>/dev/null | grep -q "dokploy-network"; do
-  sleep 5; _tries=$((_tries+1))
-done
-docker network ls | grep -q "dokploy-network" || { warn "dokploy-network not found — Dokploy may not have started yet."; }
-
-# Deploy container
+# Deploy container with host networking — avoids Docker Swarm DNS issues
+# localhost:80 = dokploy-traefik (port mapped to 0.0.0.0:80 on VM host)
 docker rm -f cloudflared-dokploy 2>/dev/null || true
 docker run -d \
   --name cloudflared-dokploy \
   --restart unless-stopped \
-  --network dokploy-network \
+  --network host \
   -v /etc/cloudflared-dokploy/creds.json:/etc/cloudflared/creds.json:ro \
   -v /etc/cloudflared-dokploy/config.yml:/etc/cloudflared/config.yml:ro \
   cloudflare/cloudflared:latest tunnel --config /etc/cloudflared/config.yml run
 
-ok "cloudflared-dokploy running on dokploy-network"
-ok "App traffic: *.${DOKPLOY_DOMAIN} → dokploy-traefik:80"
+ok "cloudflared-dokploy running (host network → localhost:80)"
+ok "App traffic: *.${DOKPLOY_DOMAIN} → Traefik:80"
 REMOTE
 }
 
