@@ -241,6 +241,83 @@ install_websocat() {
   esac
 }
 
+# ─── Cloudflare helpers: domain listing + selection ──────────────────────────
+CF_DOMAIN=""
+CF_API_TOKEN_FILE="$USER_HOME/.cloudflared/api-token"
+CF_DOMAIN_FILE="$USER_HOME/.cloudflared/minipc-domain"
+
+cf_list_zones() {
+  local token="${1:-}"
+  [ -z "$token" ] && return 1
+  curl -sf -H "Authorization: Bearer $token" \
+    "https://api.cloudflare.com/client/v4/zones?per_page=50&status=active" \
+    | grep -oP '"name"\s*:\s*"[^"]*"' | sed 's/"name"[[:space:]]*:[[:space:]]*"//;s/"//' 2>/dev/null
+}
+
+cf_select_domain() {
+  local token="${1:-}"
+  local stored_domain=""
+  [ -f "$CF_DOMAIN_FILE" ] && stored_domain=$(cat "$CF_DOMAIN_FILE" 2>/dev/null)
+
+  if [ -n "$token" ]; then
+    info "Fetching domains from your Cloudflare account..."
+    local zones
+    zones=$(cf_list_zones "$token" || true)
+    if [ -n "$zones" ]; then
+      echo ""
+      echo "  Available domains:"
+      local i=1 zone_arr=()
+      while IFS= read -r z; do
+        zone_arr+=("$z")
+        local marker=""
+        [ "$z" = "$stored_domain" ] && marker=" ← current"
+        printf "    %d) %s%s\n" "$i" "$z" "$marker"
+        (( i++ ))
+      done <<< "$zones"
+      echo ""
+      ask "Select domain [1-${#zone_arr[@]}, default=1]: "; read -r _choice
+      _choice="${_choice:-1}"
+      if [[ "$_choice" =~ ^[0-9]+$ ]] && [ "$_choice" -ge 1 ] && [ "$_choice" -le "${#zone_arr[@]}" ]; then
+        CF_DOMAIN="${zone_arr[$((_choice-1))]}"
+      else
+        warn "Invalid choice, using first domain."
+        CF_DOMAIN="${zone_arr[0]}"
+      fi
+    else
+      warn "Could not list domains via API."
+      if [ -n "$stored_domain" ]; then
+        ask "Domain [${stored_domain}]: "; read -r _d
+        CF_DOMAIN="${_d:-$stored_domain}"
+      else
+        ask "Your Cloudflare domain (e.g. example.com): "; read -r CF_DOMAIN
+      fi
+    fi
+  else
+    if [ -n "$stored_domain" ]; then
+      ask "Domain [${stored_domain}]: "; read -r _d
+      CF_DOMAIN="${_d:-$stored_domain}"
+    else
+      ask "Your Cloudflare domain (e.g. example.com): "; read -r CF_DOMAIN
+    fi
+  fi
+  ok "Selected domain: $CF_DOMAIN"
+  mkdir -p "$USER_HOME/.cloudflared"
+  echo "$CF_DOMAIN" > "$CF_DOMAIN_FILE"
+  chown "$CURRENT_USER:$CURRENT_USER" "$CF_DOMAIN_FILE"
+}
+
+cf_store_api_token() {
+  local token="$1"
+  mkdir -p "$USER_HOME/.cloudflared"
+  echo "$token" > "$CF_API_TOKEN_FILE"
+  chmod 600 "$CF_API_TOKEN_FILE"
+  chown "$CURRENT_USER:$CURRENT_USER" "$CF_API_TOKEN_FILE"
+}
+
+cf_load_api_token() {
+  [ -f "$CF_API_TOKEN_FILE" ] && cat "$CF_API_TOKEN_FILE" 2>/dev/null || true
+}
+
 # =============================================================================
 # STEP 1: Packages & Services
 # =============================================================================
@@ -400,20 +477,27 @@ step_cloudflare_tunnel() {
     warn "cloudflared not installed — run Step 1 first."; return
   fi
 
-  echo ""
-  info "You need: a Cloudflare account with your domain already added."
-  echo ""
-  ask "SSH tunnel hostname (e.g. minipc.yourdomain.com): ";    read -r TUNNEL_HOST
-  ask "Cockpit UI hostname (e.g. cockpit.yourdomain.com): ";   read -r COCKPIT_HOST
-  ask "Tunnel name (e.g. minipc-ssh): ";                       read -r TUNNEL_NAME
+  # ── Auth ──
   echo ""
   info "Choose authentication method:"
   echo "  1) Browser login (opens browser — recommended for first time)"
   echo "  2) API token    (headless/server — token from dash.cloudflare.com/profile/api-tokens)"
+  local _stored_token; _stored_token=$(cf_load_api_token)
+  [ -n "$_stored_token" ] && echo "  ✓ Saved API token detected"
   ask "Choice [1/2]: "; read -r AUTH_CHOICE
 
+  local CF_TOKEN=""
   if [ "${AUTH_CHOICE:-1}" = "2" ]; then
-    ask "Cloudflare API token: "; read -rs CF_TOKEN; echo ""
+    if [ -n "$_stored_token" ]; then
+      ask "Use saved API token? [Y/n]: "; read -r _use_saved
+      if [[ "${_use_saved:-Y}" =~ ^[Yy]$ ]]; then
+        CF_TOKEN="$_stored_token"
+      fi
+    fi
+    if [ -z "$CF_TOKEN" ]; then
+      ask "Cloudflare API token: "; read -rs CF_TOKEN; echo ""
+    fi
+    cf_store_api_token "$CF_TOKEN"
     ask "Cloudflare Account ID: "; read -r CF_ACCOUNT_ID
     export CLOUDFLARE_TUNNEL_TOKEN="$CF_TOKEN"
     sudo -u "$CURRENT_USER" CLOUDFLARE_API_TOKEN="$CF_TOKEN" cloudflared tunnel login --no-browser 2>/dev/null \
@@ -422,6 +506,21 @@ step_cloudflare_tunnel() {
     info "Opening Cloudflare browser login..."
     sudo -u "$CURRENT_USER" cloudflared login
   fi
+
+  # ── Domain selection ──
+  cf_select_domain "$CF_TOKEN"
+
+  # ── Hostnames (with domain-based defaults) ──
+  echo ""
+  info "You need: a Cloudflare account with your domain already added."
+  local _host_default="${CURRENT_USER}.${CF_DOMAIN}"
+  local _cockpit_default="cockpit.${CF_DOMAIN}"
+  ask "SSH tunnel hostname [${_host_default}]: ";    read -r TUNNEL_HOST
+  TUNNEL_HOST="${TUNNEL_HOST:-$_host_default}"
+  ask "Cockpit UI hostname [${_cockpit_default}]: "; read -r COCKPIT_HOST
+  COCKPIT_HOST="${COCKPIT_HOST:-$_cockpit_default}"
+  ask "Tunnel name [minipc-ssh]: ";                  read -r TUNNEL_NAME
+  TUNNEL_NAME="${TUNNEL_NAME:-minipc-ssh}"
 
   # Create tunnel
   info "Creating tunnel '$TUNNEL_NAME'..."

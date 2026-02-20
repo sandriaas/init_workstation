@@ -39,6 +39,188 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VM_CONF_DIR="${REPO_DIR}/generated-vm"
 _STATE="${VM_CONF_DIR}/.state"
 
+# ─── Cloudflare helpers ──────────────────────────────────────────────────────
+BLUE='\033[0;34m'
+CF_API_TOKEN_FILE=""
+CF_DOMAIN_FILE=""
+CF_DOMAIN=""
+
+_cf_init_paths() {
+  local home="${SUDO_USER:+$(eval echo "~$SUDO_USER")}"
+  home="${home:-$HOME}"
+  CF_API_TOKEN_FILE="${home}/.cloudflared/api-token"
+  CF_DOMAIN_FILE="${home}/.cloudflared/minipc-domain"
+}
+
+ensure_host_cloudflared() {
+  if command -v cloudflared &>/dev/null; then
+    ok "cloudflared installed: $(cloudflared --version 2>/dev/null | head -1)"
+    return
+  fi
+  info "cloudflared not installed on host. Installing..."
+  if command -v pacman &>/dev/null; then
+    pacman -S --noconfirm --needed cloudflared
+  elif command -v apt-get &>/dev/null; then
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+      | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" \
+      | tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
+    apt-get update && apt-get install -y cloudflared
+  elif command -v dnf &>/dev/null; then
+    curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-x86_64.rpm \
+      -o /tmp/cloudflared.rpm && rpm -i /tmp/cloudflared.rpm
+  else
+    err "Cannot install cloudflared — unknown package manager. Install manually."
+    exit 1
+  fi
+  ok "cloudflared installed: $(cloudflared --version 2>/dev/null | head -1)"
+}
+
+cf_list_zones() {
+  local token="${1:-}"
+  [ -z "$token" ] && return 1
+  curl -sf -H "Authorization: Bearer $token" \
+    "https://api.cloudflare.com/client/v4/zones?per_page=50&status=active" \
+    | grep -oP '"name"\s*:\s*"[^"]*"' | sed 's/"name"[[:space:]]*:[[:space:]]*"//;s/"//' 2>/dev/null
+}
+
+cf_load_api_token() {
+  [ -f "$CF_API_TOKEN_FILE" ] && cat "$CF_API_TOKEN_FILE" 2>/dev/null || true
+}
+
+cf_store_api_token() {
+  local token="$1" home
+  home="$(dirname "$CF_API_TOKEN_FILE")"
+  mkdir -p "$home"
+  echo "$token" > "$CF_API_TOKEN_FILE"
+  chmod 600 "$CF_API_TOKEN_FILE"
+}
+
+cf_ensure_auth() {
+  local home="${SUDO_USER:+$(eval echo "~$SUDO_USER")}"
+  home="${home:-$HOME}"
+  local cf_user="${SUDO_USER:-$USER}"
+
+  if [ -f "${home}/.cloudflared/cert.pem" ] || cloudflared tunnel list >/dev/null 2>&1; then
+    ok "Host cloudflared authenticated."
+    return
+  fi
+
+  warn "Host cloudflared not authenticated."
+  info "Choose authentication method:"
+  echo "  1) Browser login (opens browser — recommended)"
+  echo "  2) API token    (headless/server)"
+  local _stored; _stored=$(cf_load_api_token)
+  [ -n "$_stored" ] && echo "  ✓ Saved API token detected"
+  ask "Choice [1/2]: "; read -r _auth
+
+  if [ "${_auth:-1}" = "2" ]; then
+    local _token=""
+    if [ -n "$_stored" ]; then
+      ask "Use saved API token? [Y/n]: "; read -r _use
+      [[ "${_use:-Y}" =~ ^[Yy]$ ]] && _token="$_stored"
+    fi
+    if [ -z "$_token" ]; then
+      ask "Cloudflare API token: "; read -rs _token; echo ""
+    fi
+    cf_store_api_token "$_token"
+    export CLOUDFLARE_API_TOKEN="$_token"
+    sudo -u "$cf_user" CLOUDFLARE_API_TOKEN="$_token" cloudflared tunnel login --no-browser 2>/dev/null \
+      || info "Falling back to token-based route DNS"
+  else
+    info "Opening Cloudflare browser login..."
+    sudo -u "$cf_user" cloudflared login
+  fi
+}
+
+cf_select_domain() {
+  local token="${1:-}"
+  local stored_domain=""
+  [ -f "$CF_DOMAIN_FILE" ] && stored_domain=$(cat "$CF_DOMAIN_FILE" 2>/dev/null)
+
+  if [ -n "$token" ]; then
+    info "Fetching domains from your Cloudflare account..."
+    local zones
+    zones=$(cf_list_zones "$token" || true)
+    if [ -n "$zones" ]; then
+      echo ""
+      echo "  Available domains:"
+      local i=1 zone_arr=()
+      while IFS= read -r z; do
+        zone_arr+=("$z")
+        local marker=""
+        [ "$z" = "$stored_domain" ] && marker=" ← current"
+        printf "    %d) %s%s\n" "$i" "$z" "$marker"
+        (( i++ ))
+      done <<< "$zones"
+      echo ""
+      ask "Select domain [1-${#zone_arr[@]}, default=1]: "; read -r _choice
+      _choice="${_choice:-1}"
+      if [[ "$_choice" =~ ^[0-9]+$ ]] && [ "$_choice" -ge 1 ] && [ "$_choice" -le "${#zone_arr[@]}" ]; then
+        CF_DOMAIN="${zone_arr[$((_choice-1))]}"
+      else
+        warn "Invalid choice, using first domain."
+        CF_DOMAIN="${zone_arr[0]}"
+      fi
+    else
+      warn "Could not list domains via API."
+      _cf_domain_fallback "$stored_domain"
+    fi
+  else
+    _cf_domain_fallback "$stored_domain"
+  fi
+  ok "Selected domain: $CF_DOMAIN"
+  mkdir -p "$(dirname "$CF_DOMAIN_FILE")"
+  echo "$CF_DOMAIN" > "$CF_DOMAIN_FILE"
+}
+
+_cf_domain_fallback() {
+  local stored="${1:-}"
+  if [ -n "$stored" ]; then
+    ask "Domain [${stored}]: "; read -r _d
+    CF_DOMAIN="${_d:-$stored}"
+  else
+    # Try to detect from HOST_TUNNEL_DOMAIN or existing config
+    local _detected="${HOST_TUNNEL_DOMAIN:-}"
+    if [ -z "$_detected" ]; then
+      ask "Your Cloudflare domain (e.g. example.com): "; read -r CF_DOMAIN
+    else
+      ask "Domain [${_detected}]: "; read -r _d
+      CF_DOMAIN="${_d:-$_detected}"
+    fi
+  fi
+}
+
+cf_detect_vm_tunnel() {
+  local ssh_user="$1" ssh_host="$2"
+  local _vm_cf_status _vm_cf_host=""
+
+  _vm_cf_status=$(ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=5 -o BatchMode=yes "${ssh_user}@${ssh_host}" \
+    "systemctl is-active cloudflared 2>/dev/null || echo inactive" 2>/dev/null || echo inactive)
+
+  if [ "$_vm_cf_status" = "active" ]; then
+    _vm_cf_host=$(ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=5 -o BatchMode=yes "${ssh_user}@${ssh_host}" \
+      "journalctl -u cloudflared -n 200 --no-pager 2>/dev/null | grep -oP 'hostname[\"=: ]+\\K[a-z0-9._-]+\\.[a-z]{2,}' | tail -1 || true" \
+      2>/dev/null || true)
+
+    echo ""
+    echo -e "${GREEN}  ✓ cloudflared is running in VM${RESET}"
+    if [ -n "$_vm_cf_host" ]; then
+      echo -e "${GREEN}    Current tunnel hostname: ${_vm_cf_host}${RESET}"
+      echo ""
+      ask "Keep existing tunnel? [Y/n]: "; read -r _keep
+      if [[ "${_keep:-Y}" =~ ^[Yy]$ ]]; then
+        VM_TUNNEL_HOST="$_vm_cf_host"
+        echo "KEEP_VM_TUNNEL=yes"
+        return
+      fi
+    fi
+  fi
+  echo "KEEP_VM_TUNNEL=no"
+}
+
 # =============================================================================
 # Snapper snapshot helpers
 # =============================================================================
@@ -621,63 +803,77 @@ main() {
   echo ""
   echo -e "${BOLD}── Step 8b: Cloudflare Tunnel Automation ──${RESET}"
 
-  # 1. Ask for domain and subdomain
-  local _domain="${HOST_TUNNEL_DOMAIN:-easyrentbali.com}"
+  # Init CF paths
+  _cf_init_paths
+
+  # 0. Ensure cloudflared is installed on host
+  ensure_host_cloudflared
+
+  # 1. Detect existing cloudflared in VM
+  local _keep_result
+  _keep_result=$(cf_detect_vm_tunnel "$VM_SSH_USER" "$VM_SSH_HOST")
+  local _keep_tunnel
+  _keep_tunnel=$(echo "$_keep_result" | grep "KEEP_VM_TUNNEL=" | cut -d= -f2)
+
+  if [ "$_keep_tunnel" = "yes" ]; then
+    ok "Keeping existing VM tunnel: ${VM_TUNNEL_HOST}"
+    sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
+    # Still run remote setup to ensure everything is up to date
+    export VM_TUNNEL_HOST
+    update_vm_conf
+    test_cf_tunnel
+    [ -f "$_STATE" ] && sed -i 's/PHASE3_DONE=.*/PHASE3_DONE="yes"/' "$_STATE" || true
+    _snap_post "phase3 vm internal setup complete"
+    print_summary
+    return
+  fi
+
+  # 2. Ensure host cloudflared auth
+  cf_ensure_auth
+
+  # 3. Select domain + subdomain
+  local _api_token; _api_token=$(cf_load_api_token)
+  cf_select_domain "$_api_token"
+
   local _cur_sub="${VM_TUNNEL_HOST%%.*}"
   echo -e "\n${BOLD}── VM Tunnel Configuration ──────────────────────────────${RESET}"
-  echo "  Base Domain: ${_domain}"
+  echo "  Domain: ${CF_DOMAIN}"
   read -r -p "  Subdomain [${_cur_sub}]: " _input_sub
   local _final_sub="${_input_sub:-${_cur_sub}}"
-  VM_TUNNEL_HOST="${_final_sub}.${_domain}"
+  VM_TUNNEL_HOST="${_final_sub}.${CF_DOMAIN}"
   sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
-  echo -e "${GREEN}[OK] VM Tunnel Host: ${VM_TUNNEL_HOST}${RESET}"
+  ok "VM Tunnel Host: ${VM_TUNNEL_HOST}"
 
-  # 2. Check host cloudflared auth (simple check for cert.pem or ~/.cloudflared)
-  if [ ! -f ~/.cloudflared/cert.pem ] && ! cloudflared tunnel list >/dev/null 2>&1; then
-      echo -e "${YELLOW}[!!] Host cloudflared not authenticated.${RESET}"
-      echo -e "${YELLOW}    Please run 'cloudflared tunnel login' on the host first.${RESET}"
-      read -p "    Run 'cloudflared tunnel login' now? [Y/n] " -n 1 -r
-      echo ""
-      if [[ $REPLY =~ ^[Yy]$ ]]; then
-          cloudflared tunnel login
-      else
-          echo -e "${RED}[!!] Cannot proceed without authentication.${RESET}"
-          exit 1
-      fi
-  fi
-  
-  # 1. Create/Get Tunnel on Host
-  echo -e "${BLUE}[INFO] Checking tunnel '${VM_TUNNEL_NAME}'...${RESET}"
-  if ! cloudflared tunnel list | grep -q "${VM_TUNNEL_NAME}"; then
-      echo -e "${BLUE}[INFO] Creating tunnel '${VM_TUNNEL_NAME}'...${RESET}"
-      if ! cloudflared tunnel create "${VM_TUNNEL_NAME}"; then
-           echo -e "${RED}[!!] Failed to create tunnel.${RESET}"
+  # 4. Create/Get Tunnel on Host
+  local cf_user="${SUDO_USER:-$USER}"
+  info "Checking tunnel '${VM_TUNNEL_NAME}'..."
+  if ! sudo -u "$cf_user" cloudflared tunnel list 2>/dev/null | grep -q "${VM_TUNNEL_NAME}"; then
+      info "Creating tunnel '${VM_TUNNEL_NAME}'..."
+      if ! sudo -u "$cf_user" cloudflared tunnel create "${VM_TUNNEL_NAME}"; then
+           err "Failed to create tunnel."
            exit 1
       fi
-      echo -e "${GREEN}[OK] Tunnel created.${RESET}"
+      ok "Tunnel created."
   else
-      echo -e "${GREEN}[OK] Tunnel '${VM_TUNNEL_NAME}' already exists.${RESET}"
+      ok "Tunnel '${VM_TUNNEL_NAME}' already exists."
   fi
 
-  # 2. Get Tunnel Token
-  echo -e "${BLUE}[INFO] Fetching tunnel token...${RESET}"
+  # 5. Get Tunnel Token
+  info "Fetching tunnel token..."
   local VM_TUNNEL_TOKEN
-  VM_TUNNEL_TOKEN=$(cloudflared tunnel token "${VM_TUNNEL_NAME}")
+  VM_TUNNEL_TOKEN=$(sudo -u "$cf_user" cloudflared tunnel token "${VM_TUNNEL_NAME}" 2>/dev/null)
   if [[ -z "$VM_TUNNEL_TOKEN" ]]; then
-      echo -e "${RED}[!!] Failed to get tunnel token.${RESET}"
+      err "Failed to get tunnel token."
       exit 1
   fi
-  echo -e "${GREEN}[OK] Token retrieved.${RESET}"
+  ok "Token retrieved."
 
-  # 3. Route DNS (CNAME)
-  echo -e "${BLUE}[INFO] Routing DNS: ${VM_TUNNEL_HOST} -> Tunnel...${RESET}"
-  # Extract subdomain from VM_TUNNEL_HOST (e.g. vm1-ssh.example.com -> vm1-ssh)
-  # NOTE: cloudflared tunnel route dns <tunnel> <hostname> expects full hostname
-  if cloudflared tunnel route dns "${VM_TUNNEL_NAME}" "${VM_TUNNEL_HOST}"; then
-       echo -e "${GREEN}[OK] DNS route established: ${VM_TUNNEL_HOST}${RESET}"
+  # 6. Route DNS (CNAME)
+  info "Routing DNS: ${VM_TUNNEL_HOST} → Tunnel..."
+  if sudo -u "$cf_user" cloudflared tunnel route dns "${VM_TUNNEL_NAME}" "${VM_TUNNEL_HOST}" 2>/dev/null; then
+       ok "DNS route established: ${VM_TUNNEL_HOST}"
   else
-       echo -e "${YELLOW}[WARN] Failed to route DNS. Check if domain '${_domain}' is in your Cloudflare account.${RESET}"
-       # We don't exit here, as the tunnel itself might still work if user fixes DNS later
+       warn "Failed to route DNS. Check if domain '${CF_DOMAIN}' is in your Cloudflare account."
   fi
 
   # Export for remote setup

@@ -70,12 +70,15 @@ phase1.sh ───────────────────────�
                    attach virtiofs + VF hostdev XML
 
                             phase3.sh ──────────────► updates vm.conf
-                               └─ reads vm.conf         (VM_TUNNEL_HOST confirmed)
-                                  auto-creates CF tunnel on host
-                                  fetches token via CLI, routes DNS
+                               └─ reads vm.conf
+                                  installs cloudflared on host (if missing)
+                                  detects existing VM tunnel (shows hostname)
+                                  auth check (browser login / API token)
+                                  lists domains → select subdomain
+                                  creates CF tunnel, fetches token, routes DNS
                                   SSH into VM → packages + headers
-                                  static IP + cloudflared tunnel
-                                  injects token into VM
+                                  static IP + cloudflared install + token
+                                  enables cloudflared autostart in VM
 
 phase1-client.sh  (run on phone/laptop/desktop)
   └─ install websocat + openssh
@@ -150,7 +153,7 @@ All Phase 1 setup is handled by a single idempotent script.
 | **2. Disable Sleep** | Masks all sleep/suspend/hibernate targets so the server never suspends |
 | **3. Static IP** | Detects interface + gateway, asks for desired static IP/gateway/DNS, applies via NetworkManager or Netplan |
 | **4. SSH Setup** | Ensures sshd is active, explicitly enables password authentication |
-| **5. Cloudflare SSH Tunnel** | Asks tunnel hostname + name + auth (browser login or API token), creates tunnel, DNS CNAME, installs systemd service (After=network-online.target) |
+| **5. Cloudflare SSH Tunnel** | Auth (browser login or API token) → lists domains from account → creates tunnel + DNS CNAME → installs systemd service. API tokens are saved for reuse; domains are listed automatically |
 | **6. Intel iGPU SR-IOV + IOMMU** | Prompts GPU gen → installs `i915-sriov-dkms` → configures vfio-pci + udev rules → sets VF count at boot → rebuilds initramfs → patches kernel cmdline (`intel_iommu=on iommu=pt i915.enable_guc=3 i915.max_vfs=N`) → runs bootloader update |
 
 > **⚠ Kernel compatibility note:** `i915-sriov-dkms` has a `BUILD_EXCLUSIVE_KERNEL` constraint and may not build for the latest mainline kernel. If the module is excluded from your running kernel, the script **automatically detects** this and sets the compatible kernel (e.g. LTS) as the default boot entry across Limine, GRUB, and systemd-boot. You'll see a warning like:
@@ -191,23 +194,31 @@ If you experience a blank screen after the CachyOS logo when booting the LTS ker
 
 The scripts have been updated to reflect these fixes automatically.
 
-### Automated Cloudflare Tunnel (Phase 3)
+### Automated Cloudflare Tunnel (Phase 1 + Phase 3)
 
-Phase 3 now **fully automates** the Cloudflare Tunnel setup for VMs — no manual token copy-paste from the dashboard needed:
+**Zero dashboard interaction required** — the entire Cloudflare Tunnel lifecycle is CLI-driven.
 
-1. **Host authenticates** — checks `~/.cloudflared/cert.pem`; if missing, prompts `cloudflared tunnel login`
-2. **Creates tunnel** — `cloudflared tunnel create <vm-tunnel-name>` (idempotent, skips if exists)
-3. **Fetches token** — `cloudflared tunnel token <vm-tunnel-name>` (no dashboard needed)
-4. **Routes DNS** — `cloudflared tunnel route dns <vm-tunnel-name> <vm-hostname>` (creates CNAME)
-5. **Injects into VM** — SSHs into VM and runs `cloudflared service install <token>`
+#### Phase 1 (Host Tunnel)
+1. **Auth choice** — browser login (`cloudflared tunnel login`) or API token (saved for reuse in `~/.cloudflared/api-token`)
+2. **Domain listing** — if API token is used, fetches available domains from your account automatically; otherwise asks for domain
+3. **Hostname defaults** — suggests `<user>.<domain>` and `cockpit.<domain>` based on selected domain
+4. **Creates tunnel + DNS** — fully automated
 
-**Prerequisites:** Run `cloudflared tunnel login` once on the host (opens browser for Cloudflare auth). After that, all tunnel management is CLI-driven.
+#### Phase 3 (VM Tunnel)
+1. **Installs cloudflared on host** if missing (auto-detects pacman/apt/dnf)
+2. **Detects existing VM tunnel** — if cloudflared is already running in the VM, shows current hostname and asks to keep or reconfigure
+3. **Auth check** — verifies host auth; if missing, offers browser login or API token (same flow as phase1)
+4. **Domain selection** — lists domains (API token) or loads saved domain, lets you pick subdomain
+5. **Creates tunnel + token + DNS** — `cloudflared tunnel create` → `token` → `route dns`
+6. **Injects into VM** — SSHs into VM, installs `cloudflared service install <token>`, enables autostart
+7. **VM autostart** — VM starts automatically on host boot (`virsh autostart`)
+8. **cloudflared autostart** — tunnel service starts on VM boot via `systemctl enable cloudflared`
 
 ```bash
-# One-time host auth (if not already done by phase1):
-cloudflared tunnel login
+# Phase 1 handles host auth + tunnel (no separate login step needed):
+sudo bash scripts/phase1.sh
 
-# Then phase3 handles everything:
+# Phase 3 handles everything for the VM:
 sudo bash scripts/phase3.sh
 ```
 
@@ -255,11 +266,14 @@ The `configs/` directory contains templates for different OS types.
 - **Config:** `configs/windows-vm.conf`
 - **Notes:** Requires `virtio-win` ISO for network/disk drivers during install. Install Intel Arc/Iris Xe drivers inside Windows for 3D acceleration.
 
-### 3. macOS (Sequoia/Sonoma)
+### 3. macOS (Sonoma/Sequoia)
 - **Use Case:** iOS dev, Xcode
-- **GPU:** **No SR-IOV support.** macOS lacks drivers for Intel Iris Xe (requires AMD Radeon for passthrough).
+- **GPU:** **No SR-IOV support.** macOS has no drivers for Intel Iris Xe VFs. Requires dedicated AMD GPU (RX 6600 recommended) for passthrough.
+- **CPU:** Use `Haswell-noTSX` for Sonoma+ (Penryn causes kernel panics)
+- **Display:** `vmware-svga` for best resolution control via OpenCore
 - **Config:** `configs/macos-vm.conf`
-- **Notes:** Uses software rendering (slow) or requires a dedicated AMD GPU passed through.
+- **Reference:** [OSX-KVM](https://github.com/kholia/OSX-KVM) — OpenCore bootloader + macOS installer scripts
+- **Notes:** Requires OpenCore bootloader image. Fetch macOS installer with `fetch-macOS-v2.py` from OSX-KVM repo.
 
 ---
 
