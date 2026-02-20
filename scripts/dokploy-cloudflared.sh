@@ -577,7 +577,8 @@ StandardError=journal
 WantedBy=multi-user.target
 SVCEOF
   systemctl daemon-reload
-  systemctl enable --now dokploy-dns-sync
+  systemctl enable dokploy-dns-sync
+  systemctl restart dokploy-dns-sync
   ok "dokploy-dns-sync service installed and running."
   ok "New app domains will get CF CNAMEs automatically within 30s."
 fi
