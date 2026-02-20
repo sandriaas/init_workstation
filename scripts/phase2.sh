@@ -1140,19 +1140,19 @@ EOF
     <address domain='0x${PF_DOMAIN}' bus='0x${PF_BUS}' slot='0x${PF_SLOT}' function='0x${VF_FUNCTION}'/>
   </source>
   <rom file='${GPU_ROM_PATH}'/>
-  <alias name='hostdev0'/>
-  <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
 </hostdev>
 EOF
-    # Attach VF first
-    sudo virsh attach-device "$VM_NAME" "$TMP_VF_XML" --config >/dev/null 2>&1 \
-      || warn "Could not attach VF — ensure SR-IOV VFs are active (reboot if needed)."
+    # Attach VF (let libvirt auto-assign PCI address + alias)
+    if sudo virsh attach-device "$VM_NAME" "$TMP_VF_XML" --config 2>&1; then
+      ok "GPU VF 00:${PF_BUS}:${PF_SLOT}.${VF_FUNCTION} attached to ${VM_NAME}"
+    else
+      warn "Could not attach VF — ensure SR-IOV VFs are active (reboot if needed)."
+    fi
 
     # If successful, apply x-igd-lpc using the correct alias (detected from XML)
     if [ "${GPU_IGD_LPC:-no}" = "yes" ]; then
-      # Libvirt alias for the first hostdev is typically hostdev0, but can vary.
       local _dev_alias
-      _dev_alias="$(sudo virsh dumpxml "$VM_NAME" | grep -B 5 "slot='0x02'" | grep "alias name=" | cut -d"'" -f2 | head -1 || echo "hostdev0")"
+      _dev_alias="$(sudo virsh dumpxml "$VM_NAME" 2>/dev/null | grep -A2 'hostdev' | grep 'alias name=' | head -1 | sed "s/.*name='\\([^']*\\)'.*/\\1/" || echo "hostdev0")"
       _dev_alias="${_dev_alias:-hostdev0}"
 
       if command -v virt-xml >/dev/null 2>&1; then
