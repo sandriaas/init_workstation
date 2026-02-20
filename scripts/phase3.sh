@@ -937,12 +937,27 @@ main() {
   fi
   ok "Token retrieved."
 
+  # Get tunnel ID for DNS verification
+  local VM_TUNNEL_ID
+  VM_TUNNEL_ID=$(sudo -u "$cf_user" cloudflared tunnel list 2>/dev/null \
+    | awk -v n="${VM_TUNNEL_NAME}" '$0 ~ n {print $1}' | head -1)
+
   # 6. Route DNS (CNAME)
+  local _expected_target="${VM_TUNNEL_ID}.cfargotunnel.com"
   info "Routing DNS: ${VM_TUNNEL_HOST} → Tunnel..."
   if sudo -u "$cf_user" cloudflared tunnel route dns "${VM_TUNNEL_NAME}" "${VM_TUNNEL_HOST}" 2>/dev/null; then
        ok "DNS route established: ${VM_TUNNEL_HOST}"
   else
-       warn "Failed to route DNS. Check if domain '${CF_DOMAIN}' is in your Cloudflare account."
+       # Check if existing CNAME points to the wrong tunnel
+       local _current; _current=$(dig +short CNAME "${VM_TUNNEL_HOST}" 2>/dev/null | head -1 | sed 's/\.$//')
+       if [ -n "$_current" ] && [ "$_current" != "$_expected_target" ]; then
+         warn "DNS '${VM_TUNNEL_HOST}' exists but points to WRONG tunnel:"
+         warn "  Current:  ${_current}"
+         warn "  Expected: ${_expected_target}"
+         warn "  ⚠  Update this CNAME in Cloudflare Dashboard!"
+       else
+         warn "DNS route failed. Check if domain '${CF_DOMAIN}' is in your Cloudflare account."
+       fi
   fi
 
   # Export for remote setup
