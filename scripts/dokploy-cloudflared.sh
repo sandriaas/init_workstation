@@ -126,7 +126,7 @@ cf_select_domain() {
         zone_arr+=("$z")
         local m=""; [ "$z" = "$stored" ] && m=" ← current"
         printf "    %d) %s%s\n" "$i" "$z" "$m"
-        (( i++ ))
+        i=$((i+1))
       done <<< "$zones"
       echo ""
       ask "Select domain [1-${#zone_arr[@]}, default=1]:"; read -r _c
@@ -165,7 +165,7 @@ select_conf() {
     ok "Using: $(basename "$VM_CONF")"
   else
     local i=1
-    for c in "${confs[@]}"; do printf "  %d) %s\n" "$i" "$(basename "$c")"; (( i++ )); done
+    for c in "${confs[@]}"; do printf "  %d) %s\n" "$i" "$(basename "$c")"; i=$((i+1)); done
     ask "Select [1-${#confs[@]}, default=1]:"; read -r _c
     _c="${_c:-1}"
     VM_CONF="${confs[$((_c-1))]}"
@@ -352,6 +352,8 @@ cat > /etc/cloudflared-dokploy/config.yml <<CFCONFIG
 tunnel: ${DOKPLOY_TUNNEL_ID}
 credentials-file: /etc/cloudflared/creds.json
 ingress:
+  - hostname: "dokploy.${DOKPLOY_DOMAIN}"
+    service: http://dokploy:3000
   - hostname: "*.${DOKPLOY_DOMAIN}"
     service: http://dokploy-traefik:80
   - service: http_status:404
@@ -397,7 +399,8 @@ print_summary() {
   printf "  │  Traffic flow:  Internet → CF Tunnel → cloudflared (dokploy-network) → dokploy-traefik:80\n"
   echo ""
   echo -e "${BOLD}  ├─ Dokploy ──────────────────────────────────────────────────${RESET}"
-  printf "  │  %-20s http://%s:3000\n" "Dashboard:"  "${VM_SSH_HOST}"
+  printf "  │  %-20s https://dokploy.%s\n" "Dashboard:"  "${CF_DOMAIN}"
+  printf "  │  %-20s http://%s:3000\n"   "Dashboard (LAN):" "${VM_SSH_HOST}"
   echo   "  │"
   echo   "  │  ⚠  In Dokploy → Settings → Traefik:"
   echo   "  │     • Disable Let's Encrypt  (Cloudflare handles SSL)"
