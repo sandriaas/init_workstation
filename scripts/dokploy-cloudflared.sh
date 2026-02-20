@@ -365,22 +365,19 @@ fi
 # ── Deploy cloudflared on dokploy-network ────────────────────────────────────
 step "Deploy cloudflared app tunnel (${DOKPLOY_TUNNEL_NAME})"
 
-# Write credentials + config
+# Write credentials + config — everything via Traefik (official Dokploy pattern)
 mkdir -p /etc/cloudflared-dokploy
 echo "${DOKPLOY_CREDS_B64}" | base64 -d > /etc/cloudflared-dokploy/creds.json
-# Dashboard subdomain is first element of DOKPLOY_SUBDOMAINS
 _dash_sub="${DOKPLOY_SUBDOMAINS%% *}"
 cat > /etc/cloudflared-dokploy/config.yml <<CFCONFIG
 tunnel: ${DOKPLOY_TUNNEL_ID}
 credentials-file: /etc/cloudflared/creds.json
 ingress:
-  - hostname: "${_dash_sub}.${DOKPLOY_DOMAIN}"
-    service: http://dokploy:3000
   - hostname: "*.${DOKPLOY_DOMAIN}"
     service: http://dokploy-traefik:80
   - service: http_status:404
 CFCONFIG
-ok "cloudflared config written"
+ok "cloudflared config written (all traffic → dokploy-traefik:80)"
 
 # Wait for Dokploy to create dokploy-network (up to 90s)
 _tries=0
@@ -409,34 +406,40 @@ REMOTE
 # Summary
 # =============================================================================
 print_summary() {
+  local _dash="${DOKPLOY_SUBDOMAINS%% *}"
   echo ""
   echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
   echo -e "${BOLD}║              ✓  DOKPLOY + CLOUDFLARE COMPLETE               ║${RESET}"
   echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
   echo ""
   echo -e "${BOLD}  ├─ Tunnel ──────────────────────────────────────────────────${RESET}"
-  printf "  │  %-20s %s\n" "Tunnel:"       "${DOKPLOY_TUNNEL_NAME}"
-  printf "  │  %-20s %s\n" "ID:"           "${DOKPLOY_TUNNEL_ID}"
-  printf "  │  %-20s %s\n" "Dashboard DNS:" "${DOKPLOY_SUBDOMAINS}.${CF_DOMAIN}"
-  printf "  │  %-20s %s\n" "App DNS:"      "*.${CF_DOMAIN} → Traefik:80"
-  echo   "  │"
-  printf "  │  Traffic flow:  Internet → CF Tunnel → cloudflared (dokploy-network) → Traefik\n"
+  printf "  │  %-20s %s\n" "Tunnel:"  "${DOKPLOY_TUNNEL_NAME}"
+  printf "  │  %-20s %s\n" "ID:"      "${DOKPLOY_TUNNEL_ID}"
+  printf "  │  %-20s %s\n" "DNS:"     "*.${CF_DOMAIN} → dokploy-traefik:80"
+  echo   "  │  Flow: Internet → CF Tunnel → cloudflared → Traefik → apps"
   echo ""
   echo -e "${BOLD}  ├─ Dokploy ──────────────────────────────────────────────────${RESET}"
-  printf "  │  %-20s https://%s.%s\n" "Dashboard:"      "${DOKPLOY_SUBDOMAINS}" "${CF_DOMAIN}"
-  printf "  │  %-20s http://%s:3000\n"  "Dashboard (LAN):" "${VM_SSH_HOST}"
+  printf "  │  %-20s http://%s:3000  (LAN only until step below)\n" "Access now:" "${VM_SSH_HOST}"
   echo   "  │"
-  echo   "  │  ⚠  In Dokploy → Settings → Traefik:"
+  echo -e "  │  ${BOLD}⚠  Required first-time setup (via LAN):${RESET}"
+  echo   "  │"
+  echo   "  │  1. Open http://${VM_SSH_HOST}:3000 → Settings → General"
+  printf "  │     Server Domain → set to:  %s.%s\n" "${_dash}" "${CF_DOMAIN}"
+  echo   "  │     (Traefik will then proxy the dashboard)"
+  echo   "  │"
+  echo   "  │  2. Settings → Traefik:"
   echo   "  │     • Disable Let's Encrypt  (Cloudflare handles SSL)"
-  echo   "  │     • Use 'web' entrypoint (HTTP) for app domains"
+  echo   "  │     • Entrypoint: web (HTTP port 80)"
+  echo   "  │"
+  echo   "  │  After that, dashboard reachable at:"
+  printf "  │     https://%s.%s\n" "${_dash}" "${CF_DOMAIN}"
   echo   "  │"
   echo   "  │  To add an app:"
-  echo   "  │     1. Deploy app in Dokploy → Domains tab"
-  echo   "  │     2. Set domain: app.${CF_DOMAIN}  (port 80, no HTTPS)"
-  echo   "  │     3. Traefik picks it up automatically — no cloudflared changes needed"
+  echo   "  │     Deploy in Dokploy → Domains tab → app.${CF_DOMAIN} (port 80, no HTTPS)"
+  echo   "  │     Traefik routes it automatically — no cloudflared changes needed"
   echo ""
   echo -e "${BOLD}  └─ Cloudflare SSL/TLS ───────────────────────────────────────${RESET}"
-  echo   "     In CF Dashboard → SSL/TLS: set to Full (not Flexible)"
+  echo   "     CF Dashboard → SSL/TLS → set to Full (not Flexible)"
   echo ""
 }
 
