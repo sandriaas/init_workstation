@@ -252,18 +252,20 @@ setup_dokploy_tunnel() {
   ask "  Tunnel name [${DOKPLOY_TUNNEL_NAME}]:"; read -r _tn
   DOKPLOY_TUNNEL_NAME="${_tn:-$DOKPLOY_TUNNEL_NAME}"
 
-  # Ask for specific subdomains — no wildcard
+  # Dashboard subdomain
   echo ""
-  echo "  'dokploy' is always included → https://dokploy.${CF_DOMAIN} (dashboard)"
-  echo "  Add extra subdomains for your apps (space-separated, without .${CF_DOMAIN})"
-  ask "  Extra subdomains [none]:"; read -r _extra
-  DOKPLOY_SUBDOMAINS="dokploy${_extra:+ ${_extra}}"
+  ask "  Dashboard subdomain [dokploy]:"; read -r _dash
+  local _dash_sub="${_dash:-dokploy}"
+  DOKPLOY_SUBDOMAINS="${_dash_sub}"
 
+  # Wildcard DNS explanation + confirm
   echo ""
-  echo -e "  ${BOLD}Will create DNS routes:${RESET}"
-  for _s in ${DOKPLOY_SUBDOMAINS}; do
-    echo "    ${_s}.${CF_DOMAIN}  →  tunnel '${DOKPLOY_TUNNEL_NAME}'"
-  done
+  echo -e "  ${BOLD}Routing plan:${RESET}"
+  echo "    ${_dash_sub}.${CF_DOMAIN}  →  Dokploy dashboard (:3000)"
+  echo "    *.${CF_DOMAIN}            →  Dokploy Traefik (:80)  [all apps]"
+  echo ""
+  echo "  Note: CF wildcard CNAME only affects subdomains with NO existing DNS"
+  echo "  record. Your existing A/CNAME records are not touched."
   confirm "  Proceed?" || { info "Aborted by user."; exit 0; }
   echo ""
 
@@ -281,12 +283,14 @@ setup_dokploy_tunnel() {
   ok "Tunnel ID: ${DOKPLOY_TUNNEL_ID}"
 
   step "Step 5: DNS routes"
-  for _s in ${DOKPLOY_SUBDOMAINS}; do
-    local _host="${_s}.${CF_DOMAIN}"
-    sudo -u "$cf_user" cloudflared tunnel route dns "${DOKPLOY_TUNNEL_NAME}" "${_host}" 2>/dev/null \
-      && ok "DNS: ${_host}" \
-      || warn "DNS route failed (may already exist): ${_host}"
-  done
+  # Dashboard: specific record
+  sudo -u "$cf_user" cloudflared tunnel route dns "${DOKPLOY_TUNNEL_NAME}" "${_dash_sub}.${CF_DOMAIN}" 2>/dev/null \
+    && ok "DNS: ${_dash_sub}.${CF_DOMAIN}" \
+    || warn "DNS route failed (may already exist): ${_dash_sub}.${CF_DOMAIN}"
+  # Wildcard: all app subdomains → Traefik
+  sudo -u "$cf_user" cloudflared tunnel route dns "${DOKPLOY_TUNNEL_NAME}" "*.${CF_DOMAIN}" 2>/dev/null \
+    && ok "DNS: *.${CF_DOMAIN}" \
+    || warn "DNS wildcard route failed (may already exist): *.${CF_DOMAIN}"
 
   # Base64-encode credentials for VM
   local creds_home; creds_home="$(eval echo ~${cf_user})"
@@ -361,24 +365,22 @@ fi
 # ── Deploy cloudflared on dokploy-network ────────────────────────────────────
 step "Deploy cloudflared app tunnel (${DOKPLOY_TUNNEL_NAME})"
 
-# Write credentials + config (per-subdomain ingress — no wildcard)
+# Write credentials + config
 mkdir -p /etc/cloudflared-dokploy
 echo "${DOKPLOY_CREDS_B64}" | base64 -d > /etc/cloudflared-dokploy/creds.json
-{
-  echo "tunnel: ${DOKPLOY_TUNNEL_ID}"
-  echo "credentials-file: /etc/cloudflared/creds.json"
-  echo "ingress:"
-  for _sub in ${DOKPLOY_SUBDOMAINS}; do
-    echo "  - hostname: \"${_sub}.${DOKPLOY_DOMAIN}\""
-    if [ "${_sub}" = "dokploy" ]; then
-      echo "    service: http://dokploy:3000"
-    else
-      echo "    service: http://dokploy-traefik:80"
-    fi
-  done
-  echo "  - service: http_status:404"
-} > /etc/cloudflared-dokploy/config.yml
-ok "cloudflared config written (${DOKPLOY_SUBDOMAINS})"
+# Dashboard subdomain is first element of DOKPLOY_SUBDOMAINS
+_dash_sub="${DOKPLOY_SUBDOMAINS%% *}"
+cat > /etc/cloudflared-dokploy/config.yml <<CFCONFIG
+tunnel: ${DOKPLOY_TUNNEL_ID}
+credentials-file: /etc/cloudflared/creds.json
+ingress:
+  - hostname: "${_dash_sub}.${DOKPLOY_DOMAIN}"
+    service: http://dokploy:3000
+  - hostname: "*.${DOKPLOY_DOMAIN}"
+    service: http://dokploy-traefik:80
+  - service: http_status:404
+CFCONFIG
+ok "cloudflared config written"
 
 # Wait for Dokploy to create dokploy-network (up to 90s)
 _tries=0
@@ -413,26 +415,25 @@ print_summary() {
   echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
   echo ""
   echo -e "${BOLD}  ├─ Tunnel ──────────────────────────────────────────────────${RESET}"
-  printf "  │  %-20s %s\n" "Tunnel:"      "${DOKPLOY_TUNNEL_NAME}"
-  printf "  │  %-20s %s\n" "ID:"          "${DOKPLOY_TUNNEL_ID}"
-  echo   "  │  DNS routes:"
-  for _s in ${DOKPLOY_SUBDOMAINS}; do
-    printf "  │    %-30s → tunnel\n" "${_s}.${CF_DOMAIN}"
-  done
+  printf "  │  %-20s %s\n" "Tunnel:"       "${DOKPLOY_TUNNEL_NAME}"
+  printf "  │  %-20s %s\n" "ID:"           "${DOKPLOY_TUNNEL_ID}"
+  printf "  │  %-20s %s\n" "Dashboard DNS:" "${DOKPLOY_SUBDOMAINS}.${CF_DOMAIN}"
+  printf "  │  %-20s %s\n" "App DNS:"      "*.${CF_DOMAIN} → Traefik:80"
   echo   "  │"
-  printf "  │  Traffic flow:  Internet → CF Tunnel → cloudflared (dokploy-network) → dokploy / dokploy-traefik\n"
+  printf "  │  Traffic flow:  Internet → CF Tunnel → cloudflared (dokploy-network) → Traefik\n"
   echo ""
   echo -e "${BOLD}  ├─ Dokploy ──────────────────────────────────────────────────${RESET}"
-  printf "  │  %-20s https://dokploy.%s\n" "Dashboard:"  "${CF_DOMAIN}"
-  printf "  │  %-20s http://%s:3000\n"   "Dashboard (LAN):" "${VM_SSH_HOST}"
+  printf "  │  %-20s https://%s.%s\n" "Dashboard:"      "${DOKPLOY_SUBDOMAINS}" "${CF_DOMAIN}"
+  printf "  │  %-20s http://%s:3000\n"  "Dashboard (LAN):" "${VM_SSH_HOST}"
   echo   "  │"
   echo   "  │  ⚠  In Dokploy → Settings → Traefik:"
   echo   "  │     • Disable Let's Encrypt  (Cloudflare handles SSL)"
   echo   "  │     • Use 'web' entrypoint (HTTP) for app domains"
   echo   "  │"
-  echo   "  │  To add a new app subdomain:"
-  echo   "  │     1. Re-run this script → enter the new subdomain"
-  echo   "  │     2. Deploy app in Dokploy → Domains tab → add  app.${CF_DOMAIN}"
+  echo   "  │  To add an app:"
+  echo   "  │     1. Deploy app in Dokploy → Domains tab"
+  echo   "  │     2. Set domain: app.${CF_DOMAIN}  (port 80, no HTTPS)"
+  echo   "  │     3. Traefik picks it up automatically — no cloudflared changes needed"
   echo ""
   echo -e "${BOLD}  └─ Cloudflare SSL/TLS ───────────────────────────────────────${RESET}"
   echo   "     In CF Dashboard → SSL/TLS: set to Full (not Flexible)"
