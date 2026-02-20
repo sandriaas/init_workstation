@@ -70,12 +70,12 @@ phase1.sh ───────────────────────�
                    attach virtiofs + VF hostdev XML
 
                             phase3.sh ──────────────► updates vm.conf
-                              └─ reads vm.conf         (VM_TUNNEL_HOST confirmed)
-                                 SSH into VM
-                                 packages + dkms + headers
-                                 i915-sriov-dkms (guest — required!)
-                                 static IP + cloudflared tunnel
-                                 websocat service
+                               └─ reads vm.conf         (VM_TUNNEL_HOST confirmed)
+                                  auto-creates CF tunnel on host
+                                  fetches token via CLI, routes DNS
+                                  SSH into VM → packages + headers
+                                  static IP + cloudflared tunnel
+                                  injects token into VM
 
 phase1-client.sh  (run on phone/laptop/desktop)
   └─ install websocat + openssh
@@ -191,6 +191,26 @@ If you experience a blank screen after the CachyOS logo when booting the LTS ker
 
 The scripts have been updated to reflect these fixes automatically.
 
+### Automated Cloudflare Tunnel (Phase 3)
+
+Phase 3 now **fully automates** the Cloudflare Tunnel setup for VMs — no manual token copy-paste from the dashboard needed:
+
+1. **Host authenticates** — checks `~/.cloudflared/cert.pem`; if missing, prompts `cloudflared tunnel login`
+2. **Creates tunnel** — `cloudflared tunnel create <vm-tunnel-name>` (idempotent, skips if exists)
+3. **Fetches token** — `cloudflared tunnel token <vm-tunnel-name>` (no dashboard needed)
+4. **Routes DNS** — `cloudflared tunnel route dns <vm-tunnel-name> <vm-hostname>` (creates CNAME)
+5. **Injects into VM** — SSHs into VM and runs `cloudflared service install <token>`
+
+**Prerequisites:** Run `cloudflared tunnel login` once on the host (opens browser for Cloudflare auth). After that, all tunnel management is CLI-driven.
+
+```bash
+# One-time host auth (if not already done by phase1):
+cloudflared tunnel login
+
+# Then phase3 handles everything:
+sudo bash scripts/phase3.sh
+```
+
 ### Verification (Successful SR-IOV)
 
 If everything works, you should see output similar to this:
@@ -283,7 +303,7 @@ Use these scripts in order:
 # Phase 2: create VM + vm.conf + virtiofs + SR-IOV host prep
 bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase2.sh)
 
-# Phase 3: configure inside VM (SSH, static IP, cloudflared, websocat)
+# Phase 3: configure inside VM (SSH, static IP, cloudflared tunnel — automated)
 bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3.sh)
 
 # Client side for VM tunnel

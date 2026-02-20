@@ -1,0 +1,19 @@
+#cloud-config
+hostname: ubuntu-server
+users:
+  - name: sandriaas
+    passwd: "$6$C9b0.RURynazAH6w$djY1wOyW.bdYqiG/y24fw/MYFSqNYW8JO///b9vI84sov2D7NOKh9GsvarJKjWt18AMv9Ge9zKAQFskldTrwG0"
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    groups: [adm, sudo]
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIIFBbKCqFp6nZlEqgkeR+z7TCxxtWjJLs4erD3lD5tF sandriaas@host
+ssh_pwauth: true
+chpasswd:
+  expire: false
+package_update: false
+package_upgrade: false
+runcmd:
+  - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true

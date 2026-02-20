@@ -428,6 +428,9 @@ fi
 
 # ── Step 8: cloudflared + tunnel ───────────────────────────────────────────
 step "Step 8: Install cloudflared"
+# NOTE: We now automate the token retrieval from the host, so we just install and start with the token passed in VM_TUNNEL_TOKEN
+
+# 1. Install cloudflared (using same logic but simplified since we know it's Ubuntu/Debian in VM usually)
 if ! command -v cloudflared >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
     curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
@@ -445,20 +448,18 @@ https://pkg.cloudflare.com/cloudflared $(. /etc/os-release; echo "${VERSION_CODE
 fi
 ok "cloudflared installed: $(cloudflared --version 2>/dev/null | head -1)"
 
-step "Step 8b: Set up Cloudflare tunnel (VM: ${VM_TUNNEL_NAME} → ${VM_TUNNEL_HOST})"
-echo "  Tunnel: ${VM_TUNNEL_NAME}  →  ${VM_TUNNEL_HOST}"
+step "Step 8b: Configure Cloudflare Tunnel (VM: ${VM_TUNNEL_NAME})"
 
 if [ -n "${VM_TUNNEL_TOKEN:-}" ]; then
-  # Uninstall first so reinstall always picks up the correct token
+  info "Configuring tunnel with provided token..."
   cloudflared service uninstall 2>/dev/null || true
   cloudflared service install "$VM_TUNNEL_TOKEN"
   systemctl enable --now cloudflared || true
-  ok "Tunnel installed via token (cloudflared tunnel run --token ...)."
+  ok "Tunnel installed via token."
 else
   # Service already installed — just make sure it's running
   systemctl enable --now cloudflared 2>/dev/null || true
   warn "No tunnel token provided — run phase3 again with token to activate tunnel."
-  warn "  Get token: dash.cloudflare.com → Zero Trust → Networks → Tunnels → ${VM_TUNNEL_NAME} → Configure"
 fi
 
 echo ""
@@ -545,7 +546,6 @@ print_summary() {
   echo ""
   echo -e "${BOLD}  ── Cloudflare Tunnels ───────────────────────────────────────${RESET}"
   printf "  %-20s %s\n" "Host hostname:"  "${HOST_TUNNEL_HOST}"
-  [ -n "${HOST_TUNNEL_NAME:-}" ] && printf "  %-20s %s\n" "Host tunnel name:" "${HOST_TUNNEL_NAME}"
   [ -n "${HOST_TUNNEL_ID:-}" ]   && printf "  %-20s %s\n" "Host tunnel ID:"   "${HOST_TUNNEL_ID}"
   printf "  %-20s %s\n" "Host connect:"   "ssh ${VM_SSH_USER}@${HOST_TUNNEL_HOST}"
   echo ""
@@ -559,7 +559,7 @@ print_summary() {
   echo "  5. Static IP set          (${VM_STATIC_IP} via ${VM_GATEWAY})"
   echo "  6. Shared folder mounted  (/mnt/${SHARED_TAG})"
   echo "  7. i915 guest driver       (built-in, no DKMS needed in VM)"
-  echo "  8. cloudflared            (host: ${HOST_TUNNEL_HOST} → VM: ${VM_TUNNEL_HOST})"
+  echo "  8. cloudflared            (Automated: host tunnel -> VM token)"
   echo ""
   echo -e "${BOLD}  ── VM Status ────────────────────────────────────────────────${RESET}"
   virsh list --all 2>/dev/null | sed 's/^/  /' || true
@@ -617,35 +617,70 @@ main() {
   # Step 2: poll SSH until reachable
   wait_for_ssh
 
-  # ── Always prompt for tunnel token + hostname (host-side, before any SSH heredoc) ──
-  # For token-based tunnels: public hostname is set in the Cloudflare dashboard.
-  # We must ask the user for it — random generation would never match Cloudflare.
-  local _domain="${HOST_TUNNEL_DOMAIN:-${VM_TUNNEL_HOST#*.}}"
-  local _cur_sub="${VM_TUNNEL_HOST%%.*}"   # current subdomain from conf
+  # ── Automated Cloudflare Tunnel Setup ──
+  echo ""
+  echo -e "${BOLD}── Step 8b: Cloudflare Tunnel Automation ──${RESET}"
 
-  echo ""
-  echo "  ── Cloudflare Tunnel Token ────────────────────────────────"
-  echo "  dash.cloudflare.com → Zero Trust → Networks → Tunnels"
-  echo "  Select tunnel → Configure → Install connector → copy token"
-  echo ""
-  local VM_TUNNEL_TOKEN="${VM_TUNNEL_TOKEN:-}"
-  read -r -p "  Paste tunnel token (Enter to skip): " VM_TUNNEL_TOKEN
-  echo ""
-
-  echo "  ── VM Tunnel Public Hostname ────────────────────────────"
-  echo "  Domain: ${_domain}"
-  echo "  Enter the subdomain you configured in the Cloudflare dashboard"
-  echo "  for this tunnel's SSH public hostname."
-  echo "  Current in conf: ${_cur_sub}"
-  echo ""
+  # 1. Ask for domain and subdomain
+  local _domain="${HOST_TUNNEL_DOMAIN:-easyrentbali.com}"
+  local _cur_sub="${VM_TUNNEL_HOST%%.*}"
+  echo -e "\n${BOLD}── VM Tunnel Configuration ──────────────────────────────${RESET}"
+  echo "  Base Domain: ${_domain}"
   read -r -p "  Subdomain [${_cur_sub}]: " _input_sub
   local _final_sub="${_input_sub:-${_cur_sub}}"
   VM_TUNNEL_HOST="${_final_sub}.${_domain}"
   sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
-  ok "VM tunnel hostname → ${VM_TUNNEL_HOST}"
-  echo ""
+  echo -e "${GREEN}[OK] VM Tunnel Host: ${VM_TUNNEL_HOST}${RESET}"
 
-  # Export so run_remote_setup and the step-8b-only path can use them
+  # 2. Check host cloudflared auth (simple check for cert.pem or ~/.cloudflared)
+  if [ ! -f ~/.cloudflared/cert.pem ] && ! cloudflared tunnel list >/dev/null 2>&1; then
+      echo -e "${YELLOW}[!!] Host cloudflared not authenticated.${RESET}"
+      echo -e "${YELLOW}    Please run 'cloudflared tunnel login' on the host first.${RESET}"
+      read -p "    Run 'cloudflared tunnel login' now? [Y/n] " -n 1 -r
+      echo ""
+      if [[ $REPLY =~ ^[Yy]$ ]]; then
+          cloudflared tunnel login
+      else
+          echo -e "${RED}[!!] Cannot proceed without authentication.${RESET}"
+          exit 1
+      fi
+  fi
+  
+  # 1. Create/Get Tunnel on Host
+  echo -e "${BLUE}[INFO] Checking tunnel '${VM_TUNNEL_NAME}'...${RESET}"
+  if ! cloudflared tunnel list | grep -q "${VM_TUNNEL_NAME}"; then
+      echo -e "${BLUE}[INFO] Creating tunnel '${VM_TUNNEL_NAME}'...${RESET}"
+      if ! cloudflared tunnel create "${VM_TUNNEL_NAME}"; then
+           echo -e "${RED}[!!] Failed to create tunnel.${RESET}"
+           exit 1
+      fi
+      echo -e "${GREEN}[OK] Tunnel created.${RESET}"
+  else
+      echo -e "${GREEN}[OK] Tunnel '${VM_TUNNEL_NAME}' already exists.${RESET}"
+  fi
+
+  # 2. Get Tunnel Token
+  echo -e "${BLUE}[INFO] Fetching tunnel token...${RESET}"
+  local VM_TUNNEL_TOKEN
+  VM_TUNNEL_TOKEN=$(cloudflared tunnel token "${VM_TUNNEL_NAME}")
+  if [[ -z "$VM_TUNNEL_TOKEN" ]]; then
+      echo -e "${RED}[!!] Failed to get tunnel token.${RESET}"
+      exit 1
+  fi
+  echo -e "${GREEN}[OK] Token retrieved.${RESET}"
+
+  # 3. Route DNS (CNAME)
+  echo -e "${BLUE}[INFO] Routing DNS: ${VM_TUNNEL_HOST} -> Tunnel...${RESET}"
+  # Extract subdomain from VM_TUNNEL_HOST (e.g. vm1-ssh.example.com -> vm1-ssh)
+  # NOTE: cloudflared tunnel route dns <tunnel> <hostname> expects full hostname
+  if cloudflared tunnel route dns "${VM_TUNNEL_NAME}" "${VM_TUNNEL_HOST}"; then
+       echo -e "${GREEN}[OK] DNS route established: ${VM_TUNNEL_HOST}${RESET}"
+  else
+       echo -e "${YELLOW}[WARN] Failed to route DNS. Check if domain '${_domain}' is in your Cloudflare account.${RESET}"
+       # We don't exit here, as the tunnel itself might still work if user fixes DNS later
+  fi
+
+  # Export for remote setup
   export VM_TUNNEL_HOST VM_TUNNEL_TOKEN
 
   # Steps 3–8: configure VM internals over SSH
@@ -659,19 +694,18 @@ main() {
     "journalctl -u cloudflared -n 50 --no-pager 2>/dev/null | grep -c 'Connection registered' || echo 0" \
     2>/dev/null || echo 0)"
 
-  if [ "$_cf_running" = "active" ] && [ "${_cf_connected:-0}" -gt 0 ] && [ -z "$VM_TUNNEL_TOKEN" ]; then
-    ok "VM already configured (cloudflared active + connected) — skipping full setup."
-    ok "No token provided — skipping step 8b."
-  elif [ "$_cf_running" = "active" ] && [ "${_cf_connected:-0}" -gt 0 ] && [ -n "$VM_TUNNEL_TOKEN" ]; then
-    ok "VM already configured — re-running step 8b (new token provided)."
-    section "Step 8b — Reinstall cloudflared tunnel token"
+  if [ "$_cf_running" = "active" ] && [ "${_cf_connected:-0}" -gt 0 ]; then
+    ok "VM already configured (cloudflared active + connected)."
+    # Optional: Force update token anyway?
+    # For now, let's assume if it's connected, it's good. But if user re-ran script, they might want to fix it.
+    # Let's just force update the token to be safe since we just fetched a fresh one.
+    section "Step 8b — Refreshing cloudflared tunnel token"
     ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_SSH_USER}@${VM_SSH_HOST}" \
-      "VM_TUNNEL_TOKEN='${VM_TUNNEL_TOKEN}' VM_TUNNEL_HOST='${VM_TUNNEL_HOST}' \
-       VM_TUNNEL_NAME='${VM_TUNNEL_NAME}' sudo -E bash -s" <<'STEP8B'
+      "VM_TUNNEL_TOKEN='${VM_TUNNEL_TOKEN}' sudo -E bash -s" <<'STEP8B'
 cloudflared service uninstall 2>/dev/null || true
 cloudflared service install "$VM_TUNNEL_TOKEN"
 systemctl enable --now cloudflared || true
-echo "  [OK]  Tunnel token reinstalled → systemctl status cloudflared"
+echo "  [OK]  Tunnel token reinstalled"
 STEP8B
   else
     [ "$_cf_running" = "active" ] && info "cloudflared active but tunnel not connected — re-running full setup."
