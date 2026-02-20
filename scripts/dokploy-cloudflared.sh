@@ -464,12 +464,21 @@ print_summary() {
 # MAIN
 # =============================================================================
 main() {
-  echo -e "${BOLD}"
-  echo "╔══════════════════════════════════════════════════════════════╗"
+  # Subcommand dispatch
+  case "${1:-}" in
+    add-domain)
+      shift
+      echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
+      echo -e "${BOLD}║   Rev5.7.2 — Add App Domain → CF Tunnel                     ║${RESET}"
+      echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
+      cmd_add_domain "${1:-}"
+      exit 0
+      ;;
+  esac
+  echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗"
   echo "║   Rev5.7.2 — Dokploy + Cloudflare App Tunnel Setup          ║"
   echo "║   Run after phase3 completes (VM must be running)           ║"
-  echo "╚══════════════════════════════════════════════════════════════╝"
-  echo -e "${RESET}"
+  echo -e "╚══════════════════════════════════════════════════════════════╝${RESET}"
 
   _cf_init_paths
 
@@ -499,6 +508,78 @@ main() {
   run_vm_setup
 
   print_summary
+}
+
+# =============================================================================
+# Subcommand: add-domain <subdomain> — create CNAME for a new app
+# Usage: sudo bash dokploy-cloudflared.sh add-domain n8n-test-dokploy
+# =============================================================================
+cmd_add_domain() {
+  local _sub="${1:-}"
+  _cf_init_paths
+
+  # Load saved domain
+  local _domain=""
+  [ -f "$CF_DOMAIN_FILE" ] && _domain=$(cat "$CF_DOMAIN_FILE" 2>/dev/null)
+  if [ -z "$_domain" ]; then
+    ask "Domain (e.g. easyrentbali.com):"; read -r _domain
+  fi
+
+  # Load saved tunnel name from any VM conf
+  local _tunnel=""
+  local _conf
+  for _conf in "${REPO_DIR}/generated-vm/"*.conf 2>/dev/null; do
+    [ -f "$_conf" ] || continue
+    set +u; source "$_conf"; set -u
+    [ -n "${DOKPLOY_TUNNEL_NAME:-}" ] && { _tunnel="$DOKPLOY_TUNNEL_NAME"; break; }
+  done
+  if [ -z "$_tunnel" ]; then
+    local cf_user="${SUDO_USER:-$USER}"
+    echo ""
+    echo -e "  ${BOLD}Existing Tunnels:${RESET}"
+    sudo -u "$cf_user" cloudflared tunnel list 2>/dev/null | tail -n +2 | while IFS= read -r _tl; do
+      printf "    • %-36s  %s\n" "$(awk '{print $1}' <<< "$_tl")" "$(awk '{print $2}' <<< "$_tl")"
+    done
+    echo ""
+    ask "Tunnel name:"; read -r _tunnel
+  fi
+
+  # Prompt for subdomain if not given
+  if [ -z "$_sub" ]; then
+    ask "Subdomain to add (e.g. n8n, myapp, shop):"; read -r _sub
+  fi
+  local _fqdn="${_sub}.${_domain}"
+
+  local cf_user="${SUDO_USER:-$USER}"
+  local _tunnel_id
+  _tunnel_id=$(sudo -u "$cf_user" cloudflared tunnel list 2>/dev/null \
+    | awk -v n="${_tunnel}" '$0 ~ n {print $1}' | head -1)
+  [ -z "$_tunnel_id" ] && { err "Tunnel '${_tunnel}' not found."; exit 1; }
+  local _expected_target="${_tunnel_id}.cfargotunnel.com"
+
+  echo ""
+  echo -e "  ${BOLD}Will create:${RESET}"
+  echo "    CNAME  ${_fqdn}  →  ${_expected_target}"
+  echo ""
+  confirm "  Proceed?" || { info "Aborted."; exit 0; }
+
+  if sudo -u "$cf_user" cloudflared tunnel route dns "${_tunnel}" "${_fqdn}" 2>/dev/null; then
+    ok "CNAME created: ${_fqdn} → tunnel"
+    ok "https://${_fqdn} is ready (once app is deployed in Dokploy)"
+  else
+    # Check if wrong tunnel
+    local _current; _current=$(dig +short CNAME "${_fqdn}" 2>/dev/null | head -1 | sed 's/\.$//')
+    if [ -n "$_current" ] && [ "$_current" = "$_expected_target" ]; then
+      ok "CNAME already correct: ${_fqdn} → tunnel"
+    elif [ -n "$_current" ]; then
+      warn "CNAME exists but points to wrong target:"
+      warn "  Current:  ${_current}"
+      warn "  Expected: ${_expected_target}"
+      warn "  Update manually in CF Dashboard."
+    else
+      err "Failed to create CNAME for ${_fqdn}."
+    fi
+  fi
 }
 
 main "$@"
