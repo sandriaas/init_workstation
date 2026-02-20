@@ -507,9 +507,15 @@ prompt_gpu() {
     # xe.force_probe required: value = output of: cat /sys/devices/pci0000:00/0000:00:02.0/device
     XE_PROBE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//' || true)"
     XE_PROBE_ID="${XE_PROBE_ID:-$(ask "Enter device ID for xe.force_probe (cat /sys/devices/pci0000:00/0000:00:02.0/device | sed s/0x//): "; read -r _p; echo "$_p")}"
-    # : prevents EFI framebuffer
-    # conflict with i915-sriov in SR-IOV PF mode (fixes blank screen on boot)
-    # plymouth.enable=0: Plymouth framebuffer also conflicts with i915-sriov display handoff
+    # Findings:
+    # 2. Removed 'splash' boot argument: Enables verbose boot logs to diagnose hangs.
+    # 3. Removed 'video=efifb:off video=vesafb:off': These args disable display fallback, causing blank screens.
+    KERNEL_GPU_ARGS="xe.force_probe=${XE_PROBE_ID} i915.force_probe=!${XE_PROBE_ID} plymouth.enable=0"
+  else
+    # Default i915 driver (Alder Lake, etc.)
+    # Findings:
+    # 2. Removed 'splash' boot argument: Enables verbose boot logs to diagnose hangs.
+    # 3. Removed 'video=efifb:off video=vesafb:off': These args disable display fallback, causing blank screens.
     KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe plymouth.enable=0"
   fi
 

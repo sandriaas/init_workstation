@@ -627,6 +627,9 @@ step_sriov_host() {
   echo " 13   Lunar Lake                      Core Ultra 2xx (i915)"
   ask "Selection [9]: "; read -r GPU_GEN
   GPU_GEN="$(default_if_empty "$GPU_GEN" "9")"
+  # Findings:
+  # 1. Reduced VFs from 7 to 2: High VF counts cause resource contention on host display (blank screen).
+  #    Defaulting to 2 is safer and sufficient for most use cases.
   ask "How many VFs? [2]: "; read -r GPU_VF_COUNT
   GPU_VF_COUNT="$(default_if_empty "$GPU_VF_COUNT" "2")"
 
@@ -647,9 +650,10 @@ step_sriov_host() {
     *)  GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-H_RPL-H_GOPv21_igd.rom";      GPU_IGD_LPC="yes" ;;
   esac
   GPU_ROM_URL="https://github.com/LongQT-sea/intel-igpu-passthru/releases/download/v0.1/${GPU_ROM_FILE}"
-  # : prevents EFI framebuffer
-  # from conflicting with i915-sriov in SR-IOV PF mode (fixes blank screen on boot)
-  # plymouth.enable=0: Plymouth framebuffer also conflicts with i915-sriov display handoff
+  # Findings:
+  # 2. Removed 'splash' boot argument: Enables verbose boot logs to diagnose hangs (crucial for SR-IOV).
+  # 3. Removed 'video=efifb:off video=vesafb:off': These args disable display fallback, causing blank screens
+  #    if i915 driver fails/hangs. Removing them allows seeing errors on screen.
   KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe plymouth.enable=0"
 
   # Write GPU vars to vm.conf so phase2 picks them up without re-asking
@@ -742,12 +746,16 @@ EOF
 
   # 5. Patch kernel args + regenerate bootloader (after initramfs is ready)
   if [ -f /etc/default/limine ]; then
+    # Remove 'splash' to enable verbose logs
+    sudo sed -i 's/ splash//g' /etc/default/limine
     if ! grep -q "i915.enable_guc=" /etc/default/limine 2>/dev/null; then
       sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${KERNEL_GPU_ARGS}\"/g" /etc/default/limine
     fi
     sudo limine-update
-    ok "Limine updated with SR-IOV args (enable_guc + max_vfs + efifb:off)."
+    ok "Limine updated with SR-IOV args (enable_guc + max_vfs)."
   elif [ -f /etc/default/grub ]; then
+    # Remove 'splash' to enable verbose logs
+    sudo sed -i 's/ splash//g' /etc/default/grub
     if ! grep -q "i915.enable_guc=" /etc/default/grub 2>/dev/null; then
       sudo sed -i "s/\\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\\)\"/\\1 ${KERNEL_GPU_ARGS}\"/" /etc/default/grub
     fi
