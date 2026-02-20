@@ -318,6 +318,24 @@ cf_load_api_token() {
   [ -f "$CF_API_TOKEN_FILE" ] && cat "$CF_API_TOKEN_FILE" 2>/dev/null || true
 }
 
+# Docker 29 raised its minimum API version (1.24→1.44), breaking Traefik/Coolify.
+# This drop-in lowers the floor back to 1.24 — officially documented by Docker.
+apply_docker_min_api_version() {
+  local dropin="/etc/systemd/system/docker.service.d/min-api-version.conf"
+  if grep -qs "DOCKER_MIN_API_VERSION" "$dropin" 2>/dev/null; then
+    ok "DOCKER_MIN_API_VERSION drop-in already present — skipping."
+    return
+  fi
+  sudo mkdir -p /etc/systemd/system/docker.service.d
+  sudo tee "$dropin" > /dev/null <<'EOF'
+[Service]
+Environment="DOCKER_MIN_API_VERSION=1.24"
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl restart docker
+  ok "Docker min-api-version drop-in applied (Docker 29 / Traefik compat fix)."
+}
+
 # =============================================================================
 # STEP 1: Packages & Services
 # =============================================================================
@@ -333,6 +351,7 @@ step_packages() {
   # Enable core services
   sudo systemctl enable --now sshd || sudo systemctl enable --now ssh || true
   sudo systemctl enable --now docker
+  apply_docker_min_api_version
   sudo systemctl enable --now fail2ban
   sudo systemctl enable --now libvirtd.socket || sudo systemctl enable --now libvirtd || true
   sudo systemctl enable --now cockpit.socket || true

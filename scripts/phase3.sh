@@ -191,9 +191,9 @@ _cf_domain_fallback() {
   fi
 }
 
+KEEP_VM_TUNNEL="no"
 cf_detect_vm_tunnel() {
-  local ssh_user="$1" ssh_host="$2"
-  local _vm_cf_host=""
+  KEEP_VM_TUNNEL="no"
 
   # Can't check VM cloudflared status without SSH keys (password-only auth).
   # Instead, check if we have a VM_TUNNEL_HOST in the conf already.
@@ -203,11 +203,10 @@ cf_detect_vm_tunnel() {
     echo ""
     ask "Keep existing tunnel hostname? [Y/n]: "; read -r _keep
     if [[ "${_keep:-Y}" =~ ^[Yy]$ ]]; then
-      echo "  _keep_tunnel=yes"
+      KEEP_VM_TUNNEL="yes"
       return
     fi
   fi
-  echo "  _keep_tunnel=no"
 }
 
 # =============================================================================
@@ -530,13 +529,32 @@ step "Step 3: Install base packages"
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    curl wget openssh-server fail2ban
+    curl wget openssh-server fail2ban docker.io docker-compose
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y curl wget openssh-server fail2ban
+  dnf install -y curl wget openssh-server fail2ban docker docker-compose
 elif command -v pacman >/dev/null 2>&1; then
-  pacman -Syu --noconfirm --needed curl wget openssh fail2ban
+  pacman -Syu --noconfirm --needed curl wget openssh fail2ban docker docker-compose
 fi
 ok "Packages installed."
+
+# ── Docker 29 compat: DOCKER_MIN_API_VERSION drop-in ────────────────────────
+# Docker 29 raised min API version (1.24→1.44), breaking Traefik/Coolify.
+# Apply the officially documented drop-in so any Traefik version works.
+step "Step 3b: Docker 29 / Traefik compat fix"
+_dropin="/etc/systemd/system/docker.service.d/min-api-version.conf"
+if grep -qs "DOCKER_MIN_API_VERSION" "$_dropin" 2>/dev/null; then
+  ok "DOCKER_MIN_API_VERSION drop-in already present — skipping."
+else
+  mkdir -p /etc/systemd/system/docker.service.d
+  cat > "$_dropin" <<'DROPIN'
+[Service]
+Environment="DOCKER_MIN_API_VERSION=1.24"
+DROPIN
+  systemctl enable --now docker || true
+  systemctl daemon-reload
+  systemctl restart docker || true
+  ok "Docker min-api-version drop-in applied (Docker 29 / Traefik compat fix)."
+fi
 
 # ── Step 4: SSH + fail2ban ──────────────────────────────────────────────────
 step "Step 4: Configure SSH + fail2ban"
@@ -762,7 +780,7 @@ print_summary() {
   # ── Steps Completed ─────────────────────────────────────────────────────────
   echo ""
   echo -e "${BOLD}  ├─ Steps Completed ──────────────────────────────────────────${RESET}"
-  echo "  │  ✓  3. Packages        (curl wget openssh fail2ban dkms linux-headers)"
+  echo "  │  ✓  3. Packages        (curl wget openssh fail2ban docker docker-compose + Docker 29 compat)"
   echo "  │  ✓  4. SSH configured  (sshd + fail2ban, PasswordAuth yes)"
   echo "  │  ✓  5. Static IP       (${VM_STATIC_IP:-?} via ${VM_GATEWAY:-?})"
   echo "  │  ✓  6. Shared folder   (/mnt/${SHARED_TAG:-hostshare})"
@@ -796,6 +814,7 @@ print_summary() {
   echo   "       sudo virsh console ${VM_NAME:-?}"
   echo   "     VM management:"
   echo   "       sudo virsh start/stop/destroy ${VM_NAME:-?}"
+  echo   "     Next: run scripts/dokploy-cloudflared.sh to install Dokploy + CF app tunnel"
   echo ""
 
   _snap_summary
@@ -838,13 +857,10 @@ main() {
   # 0. Ensure cloudflared is installed on host
   ensure_host_cloudflared
 
-  # 1. Detect existing cloudflared in VM
-  local _keep_result
-  _keep_result=$(cf_detect_vm_tunnel "$VM_SSH_USER" "$VM_SSH_HOST")
-  local _keep_tunnel
-  _keep_tunnel=$(echo "$_keep_result" | grep "KEEP_VM_TUNNEL=" | cut -d= -f2)
+  # 1. Detect existing cloudflared in VM (uses global KEEP_VM_TUNNEL)
+  cf_detect_vm_tunnel "$VM_SSH_USER" "$VM_SSH_HOST"
 
-  if [ "$_keep_tunnel" = "yes" ]; then
+  if [ "$KEEP_VM_TUNNEL" = "yes" ]; then
     ok "Keeping existing VM tunnel: ${VM_TUNNEL_HOST}"
     sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
     # Still run remote setup to ensure everything is up to date
