@@ -513,9 +513,10 @@ STATE_DIR="/var/lib/dokploy-dns-sync"
 mkdir -p "$STATE_DIR"
 
 _cf_cname_exists() {
+  # Returns 0 (true) if a CNAME pointing to our tunnel already exists
   curl -sf -H "Authorization: Bearer $CF_API_TOKEN" \
     "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=${1}&type=CNAME" \
-    | grep -q '"count":0' && return 1 || return 0
+    | grep -q '"type":"CNAME"'
 }
 
 _cf_create_cname() {
@@ -528,10 +529,10 @@ _cf_create_cname() {
 }
 
 _get_traefik_hostnames() {
+  # Extract hostnames from Traefik Host() router rules in Docker labels
   docker ps -q 2>/dev/null | while read -r cid; do
     docker inspect "$cid" 2>/dev/null \
-      | grep -oP 'Host\(`[^`]+`\)' \
-      | grep -oP '[^`(Host]+' | grep '\.'
+      | grep -oP 'Host\(`\K[^`]+'
   done | sort -u
 }
 
