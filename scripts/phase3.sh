@@ -193,32 +193,21 @@ _cf_domain_fallback() {
 
 cf_detect_vm_tunnel() {
   local ssh_user="$1" ssh_host="$2"
-  local _vm_cf_status _vm_cf_host=""
+  local _vm_cf_host=""
 
-  _vm_cf_status=$(ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o ConnectTimeout=5 -o BatchMode=yes "${ssh_user}@${ssh_host}" \
-    "systemctl is-active cloudflared 2>/dev/null || echo inactive" 2>/dev/null || echo inactive)
-
-  if [ "$_vm_cf_status" = "active" ]; then
-    _vm_cf_host=$(ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o ConnectTimeout=5 -o BatchMode=yes "${ssh_user}@${ssh_host}" \
-      "journalctl -u cloudflared -n 200 --no-pager 2>/dev/null | grep -oP 'hostname[\"=: ]+\\K[a-z0-9._-]+\\.[a-z]{2,}' | tail -1 || true" \
-      2>/dev/null || true)
-
+  # Can't check VM cloudflared status without SSH keys (password-only auth).
+  # Instead, check if we have a VM_TUNNEL_HOST in the conf already.
+  if [ -n "${VM_TUNNEL_HOST:-}" ] && [ "${VM_TUNNEL_HOST}" != "not set" ]; then
     echo ""
-    echo -e "${GREEN}  ✓ cloudflared is running in VM${RESET}"
-    if [ -n "$_vm_cf_host" ]; then
-      echo -e "${GREEN}    Current tunnel hostname: ${_vm_cf_host}${RESET}"
-      echo ""
-      ask "Keep existing tunnel? [Y/n]: "; read -r _keep
-      if [[ "${_keep:-Y}" =~ ^[Yy]$ ]]; then
-        VM_TUNNEL_HOST="$_vm_cf_host"
-        echo "KEEP_VM_TUNNEL=yes"
-        return
-      fi
+    echo -e "${GREEN}  ✓ VM tunnel configured: ${VM_TUNNEL_HOST}${RESET}"
+    echo ""
+    ask "Keep existing tunnel hostname? [Y/n]: "; read -r _keep
+    if [[ "${_keep:-Y}" =~ ^[Yy]$ ]]; then
+      echo "  _keep_tunnel=yes"
+      return
     fi
   fi
-  echo "KEEP_VM_TUNNEL=no"
+  echo "  _keep_tunnel=no"
 }
 
 # =============================================================================
@@ -444,10 +433,7 @@ _resolve_vm_ip() {
 
 _ssh_alive() {
   local host="$1"
-  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o ConnectTimeout=3 \
-      -o BatchMode=yes \
-      "${VM_SSH_USER}@${host}" true 2>/dev/null
+  timeout 3 bash -c "echo >/dev/tcp/${host}/22" 2>/dev/null
 }
 
 wait_for_ssh() {
@@ -665,13 +651,8 @@ test_cf_tunnel() {
 
   local attempts=0
   while [ $attempts -lt 6 ]; do
-    if ssh \
-         -o StrictHostKeyChecking=no \
-         -o UserKnownHostsFile=/dev/null \
-         -o ConnectTimeout=10 \
-         -o BatchMode=yes \
-         -o "ProxyCommand=websocat -E --binary - wss://%h" \
-         "${VM_SSH_USER}@${VM_TUNNEL_HOST}" true 2>/dev/null; then
+    if command -v websocat >/dev/null 2>&1 && \
+       timeout 10 websocat -E --binary - "wss://${VM_TUNNEL_HOST}" </dev/null >/dev/null 2>&1; then
       CF_TUNNEL_RESULT="✓  working"
       ok "Tunnel SSH working:  ssh ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
       return
@@ -698,77 +679,125 @@ update_vm_conf() {
 # Summary
 # =============================================================================
 print_summary() {
-  local vm_ip; vm_ip="${VM_SSH_HOST:-${VM_STATIC_IP%/*}}"
+  local vm_ip="${VM_SSH_HOST:-${VM_STATIC_IP%/*}}"
   local HOST_IP; HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  local VM_STATE; VM_STATE="$(virsh domstate "${VM_NAME:-}" 2>/dev/null || echo unknown)"
+  local cf_status; cf_status="$(systemctl is-active cloudflared 2>/dev/null || echo inactive)"
 
   echo ""
   echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
-  echo -e "${BOLD}║                    PHASE 3 COMPLETE ✓                       ║${RESET}"
+  echo -e "${BOLD}║                  ✓  PHASE 3 COMPLETE                        ║${RESET}"
   echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
+
+  # ── VM ──────────────────────────────────────────────────────────────────────
   echo ""
-  echo -e "${BOLD}  ── VM Configuration ──────────────────────────────────────${RESET}"
-  printf "  %-18s %s\n" "Name:"        "$VM_NAME"
-  printf "  %-18s %s\n" "Hostname:"    "$VM_HOSTNAME"
-  printf "  %-18s %s\n" "User:"        "$VM_SSH_USER"
-  printf "  %-18s %s vCPU  /  %s MB RAM\n" "Resources:" "$VM_VCPUS" "$VM_RAM_MB"
-  printf "  %-18s %s  (%s GB,  %s)\n"  "Disk:" "$VM_DISK_PATH" "$VM_DISK_GB" "$VM_DISK_FORMAT"
-  printf "  %-18s %s  (machine=%s, firmware=%s)\n" "Machine:" "$VM_CPU_MODEL" "$VM_MACHINE_TYPE" "$VM_FIRMWARE"
-  printf "  %-18s %s\n" "OS Variant:"  "$VM_OS_VARIANT"
+  echo -e "${BOLD}  ┌─ VM ────────────────────────────────────────────────────────${RESET}"
+  printf "  │  %-16s %s  (%s)\n"  "Name:"        "${VM_NAME:-?}" "${VM_HOSTNAME:-?}"
+  printf "  │  %-16s %s\n"        "User:"        "${VM_SSH_USER:-${VM_USER:-?}}"
+  printf "  │  %-16s %s vCPU  •  %s MB RAM  •  %s GB disk\n" \
+                                  "Resources:"   "${VM_VCPUS:-?}" "${VM_RAM_MB:-?}" "${VM_DISK_GB:-?}"
+  printf "  │  %-16s %s  •  machine=%s  •  %s\n" \
+                                  "CPU / Type:"  "${VM_CPU_MODEL:-?}" "${VM_MACHINE_TYPE:-?}" "${VM_OS_VARIANT:-?}"
+  printf "  │  %-16s %s  •  firmware=%s\n" \
+                                  "Disk:"        "${VM_DISK_PATH:-?}" "${VM_FIRMWARE:-uefi}"
+  printf "  │  %-16s "            "State:"
+  if [ "$VM_STATE" = "running" ]; then
+    echo -e "${GREEN}${VM_STATE}${RESET}"
+  else
+    echo -e "${YELLOW}${VM_STATE}${RESET}"
+  fi
+
+  # ── Network ─────────────────────────────────────────────────────────────────
   echo ""
-  echo -e "${BOLD}  ── Network ─────────────────────────────────────────────────${RESET}"
-  printf "  %-18s %s  (physical LAN)\n"       "Host IP:"  "$HOST_IP"
-  printf "  %-18s %s  (libvirt NAT)\n"        "VM IP:"    "$vm_ip"
-  printf "  %-18s %s / %s\n"                  "Gateway:"  "$VM_GATEWAY" "$VM_DNS"
-  printf "  %-18s %s → %s\n"                  "Shared:"   "$SHARED_DIR" "$SHARED_TAG"
+  echo -e "${BOLD}  ├─ Network ──────────────────────────────────────────────────${RESET}"
+  printf "  │  %-16s %s  (LAN)\n"                    "Host IP:"     "${HOST_IP:-?}"
+  printf "  │  %-16s %s  (libvirt NAT)\n"            "VM IP:"       "$vm_ip"
+  printf "  │  %-16s %s  /  %s\n"                    "Gateway/DNS:" "${VM_GATEWAY:-?}" "${VM_DNS:-?}"
+  printf "  │  %-16s %s → %s  (virtiofs)\n"          "Shared:"      "${SHARED_DIR:-none}" "${SHARED_TAG:-none}"
+  printf "  │  %-16s %s  (${VM_STATIC_IP:-?})\n"     "Static IP:"   "$vm_ip"
+  echo   "  │"
+  echo   "  │  Internet ──cloudflare──▶ host (${HOST_IP:-?})"
+  echo   "  │                └──virbr0──▶ vm ($vm_ip)"
+
+  # ── GPU ─────────────────────────────────────────────────────────────────────
+  if [ "${GPU_PASSTHROUGH:-no}" = "yes" ]; then
+    echo ""
+    echo -e "${BOLD}  ├─ GPU Passthrough ──────────────────────────────────────────${RESET}"
+    printf "  │  %-16s %s  (driver=%s, gen%s, VFs=%s)\n" \
+                               "GPU:"        "${GPU_PCI_ID:-?}" "${GPU_DRIVER:-?}" "${GPU_GEN:-?}" "${GPU_VF_COUNT:-?}"
+    printf "  │  %-16s %s\n"   "ROM:"        "${GPU_ROM_PATH:-none}"
+    printf "  │  %-16s %s\n"   "IGD LPC:"    "${GPU_IGD_LPC:-no}"
+  fi
+
+  # ── Cloudflare Tunnels ──────────────────────────────────────────────────────
   echo ""
-  echo -e "${BOLD}  ── GPU Passthrough ─────────────────────────────────────────${RESET}"
-  printf "  %-18s %s  (driver: %s, gen %s)\n" "GPU:"      "$GPU_PCI_ID" "$GPU_DRIVER" "$GPU_GEN"
-  printf "  %-18s %s  (x-igd-lpc=%s)\n"       "VF count:" "$GPU_VF_COUNT" "$GPU_IGD_LPC"
-  printf "  %-18s %s\n"                        "ROM:"      "${GPU_ROM_PATH}"
+  echo -e "${BOLD}  ├─ Cloudflare Tunnels ───────────────────────────────────────${RESET}"
+  printf "  │  %-16s %s\n"  "Host tunnel:"    "ssh ${VM_SSH_USER:-${VM_USER:-?}}@${HOST_TUNNEL_HOST:-not set}"
+  [ -n "${HOST_TUNNEL_ID:-}" ] && \
+    printf "  │  %-16s %s\n" "Tunnel ID:"     "${HOST_TUNNEL_ID}"
+  printf "  │  %-16s "       "Host CF status:"
+  if [ "$cf_status" = "active" ]; then
+    echo -e "${GREEN}active${RESET}"
+  else
+    echo -e "${YELLOW}${cf_status}${RESET}"
+  fi
+  echo   "  │"
+  printf "  │  %-16s %s\n"  "VM hostname:"    "${VM_TUNNEL_HOST:-not set}"
+  printf "  │  %-16s %s\n"  "VM tunnel name:" "${VM_TUNNEL_NAME:-not set}"
+  printf "  │  %-16s "       "VM tunnel test:"
+  if [[ "${CF_TUNNEL_RESULT:-}" == *"working"* ]]; then
+    echo -e "${GREEN}${CF_TUNNEL_RESULT}${RESET}"
+  else
+    echo -e "${YELLOW}${CF_TUNNEL_RESULT:-not tested}${RESET}"
+  fi
+
+  # ── SSH Access ──────────────────────────────────────────────────────────────
   echo ""
-  echo -e "${BOLD}  ── Cloudflare Tunnels ───────────────────────────────────────${RESET}"
-  printf "  %-20s %s\n" "Host hostname:"  "${HOST_TUNNEL_HOST}"
-  [ -n "${HOST_TUNNEL_ID:-}" ]   && printf "  %-20s %s\n" "Host tunnel ID:"   "${HOST_TUNNEL_ID}"
-  printf "  %-20s %s\n" "Host connect:"   "ssh ${VM_SSH_USER}@${HOST_TUNNEL_HOST}"
+  echo -e "${BOLD}  ├─ SSH Access ───────────────────────────────────────────────${RESET}"
+  printf "  │  %-16s %s\n"  "Direct (LAN):"   "ssh ${VM_SSH_USER:-${VM_USER:-?}}@${vm_ip}"
+  printf "  │  %-16s %s\n"  "Via host tunnel:" "ssh ${VM_SSH_USER:-${VM_USER:-?}}@${HOST_TUNNEL_HOST:-?}"
+  printf "  │  %-16s %s\n"  "Via VM tunnel:"   "ssh -o ProxyCommand='websocat -E --binary - wss://%h' ${VM_SSH_USER:-${VM_USER:-?}}@${VM_TUNNEL_HOST:-?}"
+  printf "  │  %-16s %s\n"  "Console:"         "sudo virsh console ${VM_NAME:-?}  (Ctrl+] to exit)"
+
+  # ── Steps Completed ─────────────────────────────────────────────────────────
   echo ""
-  printf "  %-20s %s\n" "VM hostname:"    "${VM_TUNNEL_HOST}"
-  printf "  %-20s %s\n" "VM tunnel name:" "${VM_TUNNEL_NAME}"
-  printf "  %-20s %s\n" "VM connect:"     "ssh ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
+  echo -e "${BOLD}  ├─ Steps Completed ──────────────────────────────────────────${RESET}"
+  echo "  │  ✓  3. Packages        (curl wget openssh fail2ban dkms linux-headers)"
+  echo "  │  ✓  4. SSH configured  (sshd + fail2ban, PasswordAuth yes)"
+  echo "  │  ✓  5. Static IP       (${VM_STATIC_IP:-?} via ${VM_GATEWAY:-?})"
+  echo "  │  ✓  6. Shared folder   (/mnt/${SHARED_TAG:-hostshare})"
+  echo "  │  ✓  7. i915 driver     (built-in, no DKMS needed in VM)"
+  echo "  │  ✓  8. cloudflared     (automated: host tunnel → VM token → autostart)"
+
+  # ── Files ────────────────────────────────────────────────────────────────────
   echo ""
-  echo -e "${BOLD}  ── Steps Completed ─────────────────────────────────────────${RESET}"
-  echo "  3. Packages installed     (curl wget openssh fail2ban dkms linux-headers)"
-  echo "  4. SSH configured         (sshd + fail2ban enabled, PasswordAuth yes)"
-  echo "  5. Static IP set          (${VM_STATIC_IP} via ${VM_GATEWAY})"
-  echo "  6. Shared folder mounted  (/mnt/${SHARED_TAG})"
-  echo "  7. i915 guest driver       (built-in, no DKMS needed in VM)"
-  echo "  8. cloudflared            (Automated: host tunnel -> VM token)"
+  echo -e "${BOLD}  ├─ Files ────────────────────────────────────────────────────${RESET}"
+  printf "  │  %-16s %s\n"  "VM conf:"    "${VM_CONF:-?}"
+  printf "  │  %-16s %s\n"  "State:"      "${VM_CONF_DIR}/.state"
+
+  # ── Client Setup ─────────────────────────────────────────────────────────────
   echo ""
-  echo -e "${BOLD}  ── VM Status ────────────────────────────────────────────────${RESET}"
-  virsh list --all 2>/dev/null | sed 's/^/  /' || true
+  echo -e "${BOLD}  ├─ Client Setup (phone/laptop) ────────────────────────────────${RESET}"
+  echo   "  │  # Add VM SSH config (run on each client):"
+  echo   "  │  printf 'Host ${VM_NAME:-vm}\\n  HostName ${VM_TUNNEL_HOST:-?}\\n  ProxyCommand websocat -E --binary - wss://%%h\\n  User ${VM_SSH_USER:-${VM_USER:-?}}\\n' >> ~/.ssh/config"
+  echo   "  │"
+  echo   "  │  # Then connect with:"
+  echo   "  │  ssh ${VM_NAME:-vm}"
+  echo   "  │"
+  echo   "  │  # Or run full client setup script:"
+  echo   "  │  bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)"
+
+  # ── Next Steps ───────────────────────────────────────────────────────────────
   echo ""
-  echo -e "${BOLD}  ── SSH Access ───────────────────────────────────────────────${RESET}"
-  printf "  %-24s %s\n" "Direct (LAN):"       "ssh ${VM_SSH_USER}@${vm_ip}"
-  printf "  %-24s %s\n" "Via host tunnel:"     "ssh ${VM_SSH_USER}@${HOST_TUNNEL_HOST}"
-  printf "  %-24s %s\n" "VM tunnel status:"    "${CF_TUNNEL_RESULT:-not tested}"
-  printf "  %-24s %s\n" "Via VM tunnel:"       "ssh -o ProxyCommand='websocat -E --binary - wss://%h' ${VM_SSH_USER}@${VM_TUNNEL_HOST}"
+  echo -e "${BOLD}  └─ Next Steps ───────────────────────────────────────────────${RESET}"
+  echo   "     Verify:"
+  echo   "       bash scripts/check.sh"
+  echo   "     VM console:"
+  echo   "       sudo virsh console ${VM_NAME:-?}"
+  echo   "     VM management:"
+  echo   "       sudo virsh start/stop/destroy ${VM_NAME:-?}"
   echo ""
-  echo -e "${BOLD}  ── Files ───────────────────────────────────────────────────${RESET}"
-  printf "  %-18s %s\n" "VM conf:" "$VM_CONF"
-  printf "  %-18s %s\n" "State:"   "${VM_CONF_DIR}/.state"
-  echo ""
-  echo -e "${BOLD}  ── Network Diagram ─────────────────────────────────────────${RESET}"
-  echo "  Internet ──cloudflare──▶ Host ($HOST_IP / ${HOST_TUNNEL_HOST})"
-  echo "                               └──virbr0 NAT──▶ VM ($vm_ip / ${VM_TUNNEL_HOST})"
-  echo ""
-  echo -e "${BOLD}  ── Client setup (phone/laptop) ─────────────────────────────${RESET}"
-  echo "  # Install VM client (sets up 'ssh ${VM_NAME}'):"
-  echo "  bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3-client.sh)"
-  echo "  # Windows:"
-  echo "  irm https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3-client.ps1 | iex"
-  echo ""
-  echo -e "${BOLD}  ── Verify ───────────────────────────────────────────────────${RESET}"
-  echo "  bash scripts/check.sh"
-  echo ""
+
   _snap_summary
 }
 
@@ -880,33 +909,9 @@ main() {
   export VM_TUNNEL_HOST VM_TUNNEL_TOKEN
 
   # Steps 3–8: configure VM internals over SSH
-  # Skip full setup only if cloudflared active + tunnel connected AND no new token provided
-  local _cf_running _cf_connected
-  _cf_running="$(ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o ConnectTimeout=5 -o BatchMode=yes "${VM_SSH_USER}@${VM_SSH_HOST}" \
-    "systemctl is-active cloudflared 2>/dev/null || echo inactive" 2>/dev/null || echo inactive)"
-  _cf_connected="$(ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o ConnectTimeout=5 -o BatchMode=yes "${VM_SSH_USER}@${VM_SSH_HOST}" \
-    "journalctl -u cloudflared -n 50 --no-pager 2>/dev/null | grep -c 'Connection registered' || echo 0" \
-    2>/dev/null || echo 0)"
-
-  if [ "$_cf_running" = "active" ] && [ "${_cf_connected:-0}" -gt 0 ]; then
-    ok "VM already configured (cloudflared active + connected)."
-    # Optional: Force update token anyway?
-    # For now, let's assume if it's connected, it's good. But if user re-ran script, they might want to fix it.
-    # Let's just force update the token to be safe since we just fetched a fresh one.
-    section "Step 8b — Refreshing cloudflared tunnel token"
-    ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_SSH_USER}@${VM_SSH_HOST}" \
-      "VM_TUNNEL_TOKEN='${VM_TUNNEL_TOKEN}' sudo -E bash -s" <<'STEP8B'
-cloudflared service uninstall 2>/dev/null || true
-cloudflared service install "$VM_TUNNEL_TOKEN"
-systemctl enable --now cloudflared || true
-echo "  [OK]  Tunnel token reinstalled"
-STEP8B
-  else
-    [ "$_cf_running" = "active" ] && info "cloudflared active but tunnel not connected — re-running full setup."
-    run_remote_setup
-  fi
+  # With password-only auth, we can't silently probe VM state,
+  # so always run the full remote setup (idempotent).
+  run_remote_setup
 
   # Write tunnel info back to conf
   update_vm_conf
