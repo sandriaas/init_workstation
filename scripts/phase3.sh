@@ -879,18 +879,42 @@ main() {
   # 3. Select domain + subdomain
   local _api_token; _api_token=$(cf_load_api_token)
   cf_select_domain "$_api_token"
+  local cf_user="${SUDO_USER:-$USER}"
 
+  # Show existing tunnels
+  echo -e "\n${BOLD}── Existing Cloudflare Tunnels ──────────────────────────${RESET}"
+  local _tlist
+  _tlist=$(sudo -u "$cf_user" cloudflared tunnel list 2>/dev/null | tail -n +2) || true
+  if [ -n "$_tlist" ]; then
+    while IFS= read -r _tl; do
+      local _tid _tname _mk=""
+      _tid=$(awk '{print $1}' <<< "$_tl")
+      _tname=$(awk '{print $2}' <<< "$_tl")
+      [ "$_tname" = "${VM_TUNNEL_NAME}" ] && _mk=" ← this VM (${VM_NAME})"
+      printf "    • %-36s  %s%s\n" "$_tid" "$_tname" "$_mk"
+    done <<< "$_tlist"
+  else
+    echo "    (no tunnels yet)"
+  fi
+  echo ""
+
+  # Subdomain prompt — sensible default
   local _cur_sub="${VM_TUNNEL_HOST%%.*}"
-  echo -e "\n${BOLD}── VM Tunnel Configuration ──────────────────────────────${RESET}"
-  echo "  Domain: ${CF_DOMAIN}"
-  read -r -p "  Subdomain [${_cur_sub}]: " _input_sub
+  { [ "$_cur_sub" = "not set" ] || [ -z "$_cur_sub" ]; } && _cur_sub="${VM_NAME:-vm}-ssh"
+  echo "  Domain:   ${CF_DOMAIN}"
+  echo "  Tunnel:   ${VM_TUNNEL_NAME}"
+  [ -n "${VM_TUNNEL_HOST:-}" ] && [ "${VM_TUNNEL_HOST}" != "not set" ] && \
+    echo "  Current:  ${VM_TUNNEL_HOST}"
+  ask "  Subdomain [${_cur_sub}]:"; read -r _input_sub
   local _final_sub="${_input_sub:-${_cur_sub}}"
   VM_TUNNEL_HOST="${_final_sub}.${CF_DOMAIN}"
+  echo ""
+  echo -e "  ${BOLD}Will configure:${RESET}  ${VM_TUNNEL_HOST}  →  tunnel '${VM_TUNNEL_NAME}'"
+  confirm "  Proceed?" || { info "Aborted by user."; exit 0; }
   sed -i "s|^VM_TUNNEL_HOST=.*|VM_TUNNEL_HOST=\"${VM_TUNNEL_HOST}\"|" "$VM_CONF" 2>/dev/null || true
   ok "VM Tunnel Host: ${VM_TUNNEL_HOST}"
 
   # 4. Create/Get Tunnel on Host
-  local cf_user="${SUDO_USER:-$USER}"
   info "Checking tunnel '${VM_TUNNEL_NAME}'..."
   if ! sudo -u "$cf_user" cloudflared tunnel list 2>/dev/null | grep -q "${VM_TUNNEL_NAME}"; then
       info "Creating tunnel '${VM_TUNNEL_NAME}'..."

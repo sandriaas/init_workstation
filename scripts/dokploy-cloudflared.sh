@@ -230,6 +230,31 @@ setup_dokploy_tunnel() {
   DOKPLOY_TUNNEL_NAME="dokploy-${VM_NAME:-server}"
 
   step "Step 4: CF tunnel — ${DOKPLOY_TUNNEL_NAME}"
+
+  # Show existing tunnels + confirm name and wildcard DNS
+  echo ""
+  echo -e "  ${BOLD}Existing Cloudflare Tunnels:${RESET}"
+  local _tlist
+  _tlist=$(sudo -u "$cf_user" cloudflared tunnel list 2>/dev/null | tail -n +2) || true
+  if [ -n "$_tlist" ]; then
+    while IFS= read -r _tl; do
+      local _tid _tname _mk=""
+      _tid=$(awk '{print $1}' <<< "$_tl")
+      _tname=$(awk '{print $2}' <<< "$_tl")
+      [ "$_tname" = "${DOKPLOY_TUNNEL_NAME}" ] && _mk=" ← will use this"
+      printf "    • %-36s  %s%s\n" "$_tid" "$_tname" "$_mk"
+    done <<< "$_tlist"
+  else
+    echo "    (no tunnels yet)"
+  fi
+  echo ""
+  ask "  Tunnel name [${DOKPLOY_TUNNEL_NAME}]:"; read -r _tn
+  DOKPLOY_TUNNEL_NAME="${_tn:-$DOKPLOY_TUNNEL_NAME}"
+  echo ""
+  echo -e "  ${BOLD}Will configure:${RESET}  *.${CF_DOMAIN}  →  tunnel '${DOKPLOY_TUNNEL_NAME}'"
+  confirm "  Proceed?" || { info "Aborted by user."; exit 0; }
+  echo ""
+
   if ! sudo -u "$cf_user" cloudflared tunnel list 2>/dev/null | grep -q "${DOKPLOY_TUNNEL_NAME}"; then
     info "Creating tunnel '${DOKPLOY_TUNNEL_NAME}'..."
     sudo -u "$cf_user" cloudflared tunnel create "${DOKPLOY_TUNNEL_NAME}"
