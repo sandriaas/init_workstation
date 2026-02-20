@@ -279,6 +279,34 @@ info() { echo -e "${CYAN}  [>>]${RESET}  $*"; }
 warn() { echo -e "${YELLOW}  [!!]${RESET}  $*"; }
 step() { echo -e "\n${BOLD}  ── $* ──${RESET}"; }
 
+# ── Install Docker (if missing) + Docker 29 fix ──────────────────────────────
+step "Docker install + Docker 29 compat"
+if command -v docker &>/dev/null; then
+  ok "Docker already installed: $(docker --version)"
+else
+  info "Installing docker.io ..."
+  if command -v apt-get &>/dev/null; then
+    apt-get update -qq && apt-get install -y docker.io docker-compose
+  elif command -v dnf &>/dev/null; then
+    dnf install -y docker docker-compose
+  elif command -v pacman &>/dev/null; then
+    pacman -Syu --noconfirm --needed docker docker-compose
+  else
+    warn "Unknown package manager — skipping docker install"; fi
+  systemctl enable --now docker || true
+  ok "Docker installed."
+fi
+_dropin="/etc/systemd/system/docker.service.d/min-api-version.conf"
+if grep -qs "DOCKER_MIN_API_VERSION" "$_dropin" 2>/dev/null; then
+  ok "DOCKER_MIN_API_VERSION drop-in already present — skipping."
+else
+  mkdir -p /etc/systemd/system/docker.service.d
+  printf '[Service]\nEnvironment="DOCKER_MIN_API_VERSION=1.24"\n' > "$_dropin"
+  systemctl daemon-reload
+  systemctl restart docker || true
+  ok "Docker 29 compat drop-in applied."
+fi
+
 # ── Install Dokploy ───────────────────────────────────────────────────────────
 step "Install Dokploy"
 if docker ps 2>/dev/null | grep -q "dokploy"; then
