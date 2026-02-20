@@ -592,8 +592,8 @@ step_sriov_host() {
   # Skip only if BOTH kernel args AND dkms module are already in place
   SRIOV_ARGS_SET=false
   SRIOV_DKMS_SET=false
-  { grep -q "i915.max_vfs=" /etc/default/limine 2>/dev/null || \
-    grep -q "i915.max_vfs=" /etc/default/grub 2>/dev/null; } && SRIOV_ARGS_SET=true
+  { grep -q "i915.enable_guc=" /etc/default/limine 2>/dev/null || \
+    grep -q "i915.enable_guc=" /etc/default/grub 2>/dev/null; } && SRIOV_ARGS_SET=true
   { pacman -Q i915-sriov-dkms >/dev/null 2>&1 || \
     dpkg -s i915-sriov-dkms >/dev/null 2>&1 || \
     rpm -q akmod-i915-sriov >/dev/null 2>&1 || \
@@ -647,7 +647,10 @@ step_sriov_host() {
     *)  GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-H_RPL-H_GOPv21_igd.rom";      GPU_IGD_LPC="yes" ;;
   esac
   GPU_ROM_URL="https://github.com/LongQT-sea/intel-igpu-passthru/releases/download/v0.1/${GPU_ROM_FILE}"
-  KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe"
+  # video=efifb:off video=vesafb:off initcall_blacklist=sysfb_init: prevents EFI framebuffer
+  # from conflicting with i915-sriov in SR-IOV PF mode (fixes blank screen on boot)
+  # plymouth.enable=0: Plymouth framebuffer also conflicts with i915-sriov display handoff
+  KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe video=efifb:off video=vesafb:off initcall_blacklist=sysfb_init plymouth.enable=0"
 
   # Write GPU vars to vm.conf so phase2 picks them up without re-asking
   mkdir -p "${REPO_DIR}/configs"
@@ -714,15 +717,21 @@ EOF
 ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:00:02.[1-7]", ATTR{vendor}=="0x8086", ATTR{device}=="0x${DEVICE_ID}", DRIVER!="vfio-pci", RUN+="/bin/sh -c 'echo \$kernel > /sys/bus/pci/devices/\$kernel/driver/unbind; echo vfio-pci > /sys/bus/pci/devices/\$kernel/driver_override; modprobe vfio-pci; echo \$kernel > /sys/bus/pci/drivers/vfio-pci/bind'"
 EOF
 
-  # 3. Enable VF creation at boot via sysfs/tmpfiles
-  if [ -f /etc/tmpfiles.d/i915-set-sriov-numvfs.conf ]; then
-    sudo sed -i "s|^#*w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs.*|w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs - - - - ${GPU_VF_COUNT}|" \
-      /etc/tmpfiles.d/i915-set-sriov-numvfs.conf
-  else
-    if ! grep -q "sriov_numvfs" /etc/sysfs.conf 2>/dev/null; then
-      echo "devices/pci0000:00/0000:00:02.0/sriov_numvfs = ${GPU_VF_COUNT}" | sudo tee -a /etc/sysfs.conf >/dev/null
-    fi
-  fi
+  # 3a. modprobe.d: enable_guc + max_vfs (belt-and-suspenders alongside cmdline)
+  sudo mkdir -p /etc/modprobe.d
+  sudo tee /etc/modprobe.d/i915.conf >/dev/null <<EOF
+# i915 SR-IOV options (also set in kernel cmdline for early init)
+blacklist xe
+options i915 enable_guc=3 max_vfs=${GPU_VF_COUNT}
+EOF
+  ok "i915 modprobe.d options written."
+
+  # 3b. Enable VF creation at runtime via tmpfiles.d (sriov_numvfs must be written after i915 loads)
+  sudo tee /etc/tmpfiles.d/i915-sriov-numvfs.conf >/dev/null <<EOF
+# Activate i915 SR-IOV VFs after i915 driver is loaded
+w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs - - - - ${GPU_VF_COUNT}
+EOF
+  ok "tmpfiles.d VF creation written (/etc/tmpfiles.d/i915-sriov-numvfs.conf)."
 
   # 4. Rebuild initramfs (includes new dkms module + vfio)
   case "$OS" in
@@ -733,13 +742,13 @@ EOF
 
   # 5. Patch kernel args + regenerate bootloader (after initramfs is ready)
   if [ -f /etc/default/limine ]; then
-    if ! grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/limine 2>/dev/null; then
+    if ! grep -q "i915.enable_guc=" /etc/default/limine 2>/dev/null; then
       sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${KERNEL_GPU_ARGS}\"/g" /etc/default/limine
     fi
     sudo limine-update
-    ok "Limine updated with SR-IOV args."
+    ok "Limine updated with SR-IOV args (enable_guc + max_vfs + efifb:off)."
   elif [ -f /etc/default/grub ]; then
-    if ! grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/grub 2>/dev/null; then
+    if ! grep -q "i915.enable_guc=" /etc/default/grub 2>/dev/null; then
       sudo sed -i "s/\\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\\)\"/\\1 ${KERNEL_GPU_ARGS}\"/" /etc/default/grub
     fi
     case "$OS" in

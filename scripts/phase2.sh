@@ -507,9 +507,10 @@ prompt_gpu() {
     # xe.force_probe required: value = output of: cat /sys/devices/pci0000:00/0000:00:02.0/device
     XE_PROBE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//' || true)"
     XE_PROBE_ID="${XE_PROBE_ID:-$(ask "Enter device ID for xe.force_probe (cat /sys/devices/pci0000:00/0000:00:02.0/device | sed s/0x//): "; read -r _p; echo "$_p")}"
-    KERNEL_GPU_ARGS="xe.max_vfs=${GPU_VF_COUNT} xe.force_probe=${XE_PROBE_ID} module_blacklist=i915"
-  else
-    KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe"
+    # video=efifb:off video=vesafb:off initcall_blacklist=sysfb_init: prevents EFI framebuffer
+    # conflict with i915-sriov in SR-IOV PF mode (fixes blank screen on boot)
+    # plymouth.enable=0: Plymouth framebuffer also conflicts with i915-sriov display handoff
+    KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe video=efifb:off video=vesafb:off initcall_blacklist=sysfb_init plymouth.enable=0"
   fi
 
   # QEMU legacy-mode restriction warning (QEMU 10.1+ restricts to SNB→CML per LongQT-sea guide fn[4])
@@ -765,8 +766,9 @@ install_sriov_host() {
   # Skip only if BOTH kernel args AND dkms module are already in place (phase1 ran step 6)
   SRIOV_ARGS_SET=false
   SRIOV_DKMS_SET=false
-  { grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/limine 2>/dev/null || \
-    grep -q "${GPU_DRIVER}.max_vfs=" /etc/default/grub 2>/dev/null; } && SRIOV_ARGS_SET=true
+  { grep -q "${GPU_DRIVER}.enable_guc=\|${GPU_DRIVER}.force_probe=" /etc/default/limine 2>/dev/null || \
+    grep -q "${GPU_DRIVER}.enable_guc=\|${GPU_DRIVER}.force_probe=" /etc/default/grub 2>/dev/null || \
+    grep -q "max_vfs=" /etc/modprobe.d/i915.conf 2>/dev/null; } && SRIOV_ARGS_SET=true
   { pacman -Q i915-sriov-dkms >/dev/null 2>&1 || \
     dpkg -s i915-sriov-dkms >/dev/null 2>&1 || \
     rpm -q akmod-i915-sriov >/dev/null 2>&1 || \
@@ -818,12 +820,12 @@ install_sriov_host() {
 
   FULL_KERNEL_ARGS="intel_iommu=on iommu=pt ${KERNEL_GPU_ARGS}"
   if [ -f /etc/default/limine ]; then
-    if ! grep -q "${GPU_DRIVER}.max_vfs=${GPU_VF_COUNT}" /etc/default/limine 2>/dev/null; then
+    if ! grep -q "i915.enable_guc=\|xe.force_probe=" /etc/default/limine 2>/dev/null; then
       sudo sed -i "s/\\(KERNEL_CMDLINE\\[[^]]*\\]+=\"[^\"]*\\)\"/\\1 ${FULL_KERNEL_ARGS}\"/g" /etc/default/limine || true
     fi
     sudo limine-update || warn "limine-update failed — regenerate boot config manually"
   elif [ -f /etc/default/grub ]; then
-    if ! grep -q "${GPU_DRIVER}.max_vfs=${GPU_VF_COUNT}" /etc/default/grub 2>/dev/null; then
+    if ! grep -q "i915.enable_guc=\|xe.force_probe=" /etc/default/grub 2>/dev/null; then
       sudo sed -i "s/\\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\\)\"/\\1 ${FULL_KERNEL_ARGS}\"/" /etc/default/grub
     fi
     case "$OS" in
@@ -833,13 +835,21 @@ install_sriov_host() {
     esac
   fi
 
-  if [ -f /etc/tmpfiles.d/i915-set-sriov-numvfs.conf ]; then
-    sudo sed -i "s|^#*w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs.*|w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs - - - - ${GPU_VF_COUNT}|" /etc/tmpfiles.d/i915-set-sriov-numvfs.conf
-  else
-    if ! grep -q "sriov_numvfs" /etc/sysfs.conf 2>/dev/null; then
-      echo "devices/pci0000:00/0000:00:02.0/sriov_numvfs = ${GPU_VF_COUNT}" | sudo tee -a /etc/sysfs.conf >/dev/null
-    fi
-  fi
+  # modprobe.d: enable_guc + max_vfs (belt-and-suspenders alongside cmdline)
+  sudo mkdir -p /etc/modprobe.d
+  sudo tee /etc/modprobe.d/i915.conf >/dev/null <<EOF
+# i915 SR-IOV options (also set in kernel cmdline for early init)
+blacklist xe
+options i915 enable_guc=3 max_vfs=${GPU_VF_COUNT}
+EOF
+  ok "i915 modprobe.d options written."
+
+  # VF creation at runtime via tmpfiles.d (sriov_numvfs written after i915 loads in PF mode)
+  sudo tee /etc/tmpfiles.d/i915-sriov-numvfs.conf >/dev/null <<EOF
+# Activate i915 SR-IOV VFs after i915 driver is loaded
+w /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs - - - - ${GPU_VF_COUNT}
+EOF
+  ok "tmpfiles.d VF creation written."
 
   echo "vfio-pci" | sudo tee /etc/modules-load.d/vfio.conf >/dev/null
   DEVICE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//' || true)"
