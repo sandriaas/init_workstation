@@ -65,6 +65,14 @@ cf_list_zones() {
     | grep -oP '"name"\s*:\s*"[^"]*"' | sed 's/"name"[[:space:]]*:[[:space:]]*"//;s/"//' 2>/dev/null
 }
 
+cf_fetch_zone_id() {
+  local token="${1:-}" domain="${2:-}"
+  [ -z "$token" ] || [ -z "$domain" ] && return 1
+  curl -sf -H "Authorization: Bearer $token" \
+    "https://api.cloudflare.com/client/v4/zones?name=${domain}&status=active" \
+    | grep -oP '"id":"[a-f0-9]+"' | head -1 | cut -d'"' -f4
+}
+
 ensure_host_cloudflared() {
   command -v cloudflared &>/dev/null && {
     ok "cloudflared: $(cloudflared --version 2>/dev/null | head -1)"; return
@@ -225,6 +233,8 @@ DOKPLOY_TUNNEL_ID=""
 DOKPLOY_TUNNEL_NAME=""
 DOKPLOY_CREDS_B64=""
 DOKPLOY_SUBDOMAINS=""   # space-separated, e.g. "dokploy app1 shop"
+DOKPLOY_CF_ZONE_ID=""
+DOKPLOY_CF_API_TOKEN=""
 
 setup_dokploy_tunnel() {
   local cf_user="${SUDO_USER:-$USER}"
@@ -323,6 +333,21 @@ setup_dokploy_tunnel() {
   else
     err "Credentials not found: ${creds_file}"; exit 1
   fi
+
+  # Fetch CF Zone ID for DNS sync watcher
+  local _api_token; _api_token=$(cf_load_api_token)
+  DOKPLOY_CF_ZONE_ID=""
+  DOKPLOY_CF_API_TOKEN=""
+  if [ -n "$_api_token" ]; then
+    DOKPLOY_CF_ZONE_ID=$(cf_fetch_zone_id "$_api_token" "$CF_DOMAIN" || true)
+    [ -n "$DOKPLOY_CF_ZONE_ID" ] && DOKPLOY_CF_API_TOKEN="$_api_token"
+  fi
+  if [ -z "$DOKPLOY_CF_ZONE_ID" ]; then
+    warn "Could not fetch CF Zone ID — DNS auto-sync will be disabled."
+    warn "Ensure your API token has Zone:Read + DNS:Edit permissions."
+  else
+    ok "CF Zone ID: ${DOKPLOY_CF_ZONE_ID}"
+  fi
 }
 
 # =============================================================================
@@ -338,6 +363,8 @@ run_vm_setup() {
      DOKPLOY_CREDS_B64='${DOKPLOY_CREDS_B64}' \
      DOKPLOY_DOMAIN='${CF_DOMAIN}' \
      DOKPLOY_SUBDOMAINS='${DOKPLOY_SUBDOMAINS}' \
+     DOKPLOY_CF_ZONE_ID='${DOKPLOY_CF_ZONE_ID}' \
+     DOKPLOY_CF_API_TOKEN='${DOKPLOY_CF_API_TOKEN}' \
      sudo -E bash -s" <<'REMOTE'
 set -euo pipefail
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
@@ -416,6 +443,102 @@ docker run -d \
 
 ok "cloudflared-dokploy running (host network → localhost:80)"
 ok "App traffic: *.${DOKPLOY_DOMAIN} → Traefik:80"
+
+# ── DNS auto-sync watcher ─────────────────────────────────────────────────────
+step "DNS auto-sync service"
+if [ -z "${DOKPLOY_CF_ZONE_ID}" ] || [ -z "${DOKPLOY_CF_API_TOKEN}" ]; then
+  warn "CF Zone ID or API token not set — skipping DNS auto-sync."
+  warn "Run: sudo bash scripts/dokploy-cloudflared.sh add-domain <subdomain>"
+else
+  mkdir -p /etc/dokploy-dns-sync /var/lib/dokploy-dns-sync
+
+  # Config
+  cat > /etc/dokploy-dns-sync/config.env <<DNSCONF
+CF_API_TOKEN=${DOKPLOY_CF_API_TOKEN}
+CF_ZONE_ID=${DOKPLOY_CF_ZONE_ID}
+CF_DOMAIN=${DOKPLOY_DOMAIN}
+TUNNEL_ID=${DOKPLOY_TUNNEL_ID}
+DNSCONF
+  chmod 600 /etc/dokploy-dns-sync/config.env
+
+  # Watcher script
+  cat > /usr/local/bin/dokploy-dns-sync <<'WATCHER'
+#!/usr/bin/env bash
+# Auto-create CF DNS CNAMEs for new Dokploy app hostnames
+set -uo pipefail
+source /etc/dokploy-dns-sync/config.env
+TUNNEL_TARGET="${TUNNEL_ID}.cfargotunnel.com"
+STATE_DIR="/var/lib/dokploy-dns-sync"
+mkdir -p "$STATE_DIR"
+
+_cf_cname_exists() {
+  curl -sf -H "Authorization: Bearer $CF_API_TOKEN" \
+    "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=${1}&type=CNAME" \
+    | grep -q '"count":0' && return 1 || return 0
+}
+
+_cf_create_cname() {
+  curl -sf -X POST \
+    -H "Authorization: Bearer $CF_API_TOKEN" \
+    -H "Content-Type: application/json" \
+    --data "{\"type\":\"CNAME\",\"name\":\"${1}\",\"content\":\"${TUNNEL_TARGET}\",\"proxied\":true}" \
+    "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
+    | grep -q '"success":true'
+}
+
+_get_traefik_hostnames() {
+  docker ps -q 2>/dev/null | while read -r cid; do
+    docker inspect "$cid" 2>/dev/null \
+      | grep -oP 'Host\(`[^`]+`\)' \
+      | grep -oP '[^`(Host]+' | grep '\.'
+  done | sort -u
+}
+
+while true; do
+  while IFS= read -r host; do
+    [[ "$host" != *".${CF_DOMAIN}" ]] && continue
+    state_file="${STATE_DIR}/${host//\//_}"
+    [ -f "$state_file" ] && continue
+    if _cf_cname_exists "$host"; then
+      touch "$state_file"
+      echo "[$(date -Iseconds)] Already exists: $host"
+      continue
+    fi
+    if _cf_create_cname "$host"; then
+      touch "$state_file"
+      echo "[$(date -Iseconds)] Created CNAME: $host → $TUNNEL_TARGET"
+    else
+      echo "[$(date -Iseconds)] WARN: Failed to create CNAME: $host" >&2
+    fi
+  done < <(_get_traefik_hostnames 2>/dev/null || true)
+  sleep 30
+done
+WATCHER
+  chmod +x /usr/local/bin/dokploy-dns-sync
+
+  # Systemd service
+  cat > /etc/systemd/system/dokploy-dns-sync.service <<SVCEOF
+[Unit]
+Description=Dokploy DNS Auto-Sync — auto-create CF CNAMEs for new app domains
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dokploy-dns-sync
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+  systemctl daemon-reload
+  systemctl enable --now dokploy-dns-sync
+  ok "dokploy-dns-sync service installed and running."
+  ok "New app domains will get CF CNAMEs automatically within 30s."
+fi
 REMOTE
 }
 
@@ -528,7 +651,7 @@ cmd_add_domain() {
   # Load saved tunnel name from any VM conf
   local _tunnel=""
   local _conf
-  for _conf in "${REPO_DIR}/generated-vm/"*.conf 2>/dev/null; do
+  for _conf in "${REPO_DIR}/generated-vm/"*.conf; do
     [ -f "$_conf" ] || continue
     set +u; source "$_conf"; set -u
     [ -n "${DOKPLOY_TUNNEL_NAME:-}" ] && { _tunnel="$DOKPLOY_TUNNEL_NAME"; break; }
