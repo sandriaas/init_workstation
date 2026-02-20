@@ -1150,21 +1150,28 @@ EOF
     <address domain='0x${PF_DOMAIN}' bus='0x${PF_BUS}' slot='0x${PF_SLOT}' function='0x${VF_FUNCTION}'/>
   </source>
   <rom file='${GPU_ROM_PATH}'/>
-  <alias name='hostpci0'/>
+  <alias name='hostdev0'/>
   <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
 </hostdev>
 EOF
+    # Attach VF first
     sudo virsh attach-device "$VM_NAME" "$TMP_VF_XML" --config >/dev/null 2>&1 \
-      || warn "Could not attach VF yet — reboot host first if SR-IOV VFs are not visible."
+      || warn "Could not attach VF — ensure SR-IOV VFs are active (reboot if needed)."
 
+    # If successful, apply x-igd-lpc using the correct alias (detected from XML)
     if [ "${GPU_IGD_LPC:-no}" = "yes" ]; then
+      # Libvirt alias for the first hostdev is typically hostdev0, but can vary.
+      local _dev_alias
+      _dev_alias="$(sudo virsh dumpxml "$VM_NAME" | grep -B 5 "slot='0x02'" | grep "alias name=" | cut -d"'" -f2 | head -1 || echo "hostdev0")"
+      _dev_alias="${_dev_alias:-hostdev0}"
+
       if command -v virt-xml >/dev/null 2>&1; then
-        sudo virt-xml "$VM_NAME" --edit --qemu-commandline='-set device.hostpci0.x-igd-lpc=on' 2>/dev/null \
+        sudo virt-xml "$VM_NAME" --edit --qemu-commandline="-set device.${_dev_alias}.x-igd-lpc=on" 2>/dev/null \
           || warn "Could not auto-add x-igd-lpc. Add manually: virsh edit ${VM_NAME}"
       else
         warn "Add x-igd-lpc manually (required for Alder Lake+):"
         warn "  sudo virsh edit ${VM_NAME}"
-        warn "  Add: <qemu:commandline><qemu:arg value='-set'/><qemu:arg value='device.hostpci0.x-igd-lpc=on'/></qemu:commandline>"
+        warn "  Add: <qemu:commandline><qemu:arg value='-set'/><qemu:arg value='device.${_dev_alias}.x-igd-lpc=on'/></qemu:commandline>"
       fi
     fi
   elif [ "${GPU_PASSTHROUGH:-no}" = "yes" ]; then
