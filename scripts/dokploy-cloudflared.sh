@@ -506,14 +506,17 @@ DNSCONF
   cat > /usr/local/bin/dokploy-dns-sync <<'WATCHER'
 #!/usr/bin/env bash
 # Auto-create CF DNS CNAMEs for new Dokploy app hostnames
-set -uo pipefail
+# Uses docker events for instant detection + periodic poll as fallback
+set -u
 source /etc/dokploy-dns-sync/config.env
 TUNNEL_TARGET="${TUNNEL_ID}.cfargotunnel.com"
 STATE_DIR="/var/lib/dokploy-dns-sync"
 mkdir -p "$STATE_DIR"
 
+log()  { echo "[$(date -Iseconds)] $*"; }
+warn() { echo "[$(date -Iseconds)] WARN: $*" >&2; }
+
 _cf_cname_exists() {
-  # Returns 0 (true) if a CNAME pointing to our tunnel already exists
   curl -sf -H "Authorization: Bearer $CF_API_TOKEN" \
     "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=${1}&type=CNAME" \
     | grep -q '"type":"CNAME"'
@@ -528,32 +531,68 @@ _cf_create_cname() {
     | grep -q '"success":true'
 }
 
-_get_traefik_hostnames() {
-  # Extract hostnames from Traefik Host() router rules in Docker labels
-  docker ps -q 2>/dev/null | while read -r cid; do
-    docker inspect "$cid" 2>/dev/null \
-      | grep -oP 'Host\(`\K[^`]+'
-  done | sort -u
+process_hostname() {
+  local host="$1"
+  [[ "$host" != *".${CF_DOMAIN}" ]] && return 0
+  local state_file="${STATE_DIR}/${host//\//_}"
+  [ -f "$state_file" ] && return 0
+  if _cf_cname_exists "$host"; then
+    touch "$state_file"
+    log "Already exists: $host"
+    return 0
+  fi
+  if _cf_create_cname "$host"; then
+    touch "$state_file"
+    log "Created CNAME: $host → $TUNNEL_TARGET"
+  else
+    warn "Failed to create CNAME: $host"
+  fi
 }
 
+scan_all() {
+  local found=0
+  for cid in $(docker ps -q 2>/dev/null); do
+    for host in $(docker inspect "$cid" 2>/dev/null | grep -oP 'Host\(`\K[^`]+' || true); do
+      process_hostname "$host"
+      found=1
+    done
+  done
+  return 0
+}
+
+scan_container() {
+  local cid="$1"
+  for host in $(docker inspect "$cid" 2>/dev/null | grep -oP 'Host\(`\K[^`]+' || true); do
+    process_hostname "$host"
+  done
+}
+
+# ── startup ──
+log "DNS watcher started (events + poll every 60s)"
+scan_all
+
+# ── background: periodic full scan ──
+(
+  while true; do
+    sleep 60
+    scan_all
+  done
+) &
+POLL_PID=$!
+trap 'kill $POLL_PID 2>/dev/null; exit 0' TERM INT
+
+# ── foreground: react to docker container start/update events instantly ──
 while true; do
-  while IFS= read -r host; do
-    [[ "$host" != *".${CF_DOMAIN}" ]] && continue
-    state_file="${STATE_DIR}/${host//\//_}"
-    [ -f "$state_file" ] && continue
-    if _cf_cname_exists "$host"; then
-      touch "$state_file"
-      echo "[$(date -Iseconds)] Already exists: $host"
-      continue
-    fi
-    if _cf_create_cname "$host"; then
-      touch "$state_file"
-      echo "[$(date -Iseconds)] Created CNAME: $host → $TUNNEL_TARGET"
-    else
-      echo "[$(date -Iseconds)] WARN: Failed to create CNAME: $host" >&2
-    fi
-  done < <(_get_traefik_hostnames 2>/dev/null || true)
-  sleep 30
+  docker events --filter 'type=container' --filter 'event=start' \
+                --format '{{.ID}}' 2>/dev/null \
+  | while read -r cid; do
+    sleep 2  # brief wait for labels to be applied
+    log "Container started: ${cid:0:12}"
+    scan_container "$cid"
+  done
+  # docker events exited (docker restart?), reconnect after brief pause
+  warn "docker events disconnected, reconnecting in 5s..."
+  sleep 5
 done
 WATCHER
   chmod +x /usr/local/bin/dokploy-dns-sync
