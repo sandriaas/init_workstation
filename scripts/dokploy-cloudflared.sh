@@ -397,6 +397,23 @@ info() { echo -e "${CYAN}  [>>]${RESET}  $*"; }
 warn() { echo -e "${YELLOW}  [!!]${RESET}  $*"; }
 step() { echo -e "\n${BOLD}  ── $* ──${RESET}"; }
 
+# ── Save CF API token on VM ───────────────────────────────────────────────────
+if [ -n "${DOKPLOY_CF_API_TOKEN}" ]; then
+  mkdir -p /root/.cloudflared
+  echo "${DOKPLOY_CF_API_TOKEN}" > /root/.cloudflared/api-token
+  chmod 600 /root/.cloudflared/api-token
+  # Also save for the login user if different
+  _vm_user=$(logname 2>/dev/null || echo "")
+  if [ -n "$_vm_user" ] && [ "$_vm_user" != "root" ] && id "$_vm_user" &>/dev/null; then
+    _vm_home=$(eval echo "~$_vm_user")
+    mkdir -p "${_vm_home}/.cloudflared"
+    echo "${DOKPLOY_CF_API_TOKEN}" > "${_vm_home}/.cloudflared/api-token"
+    chmod 600 "${_vm_home}/.cloudflared/api-token"
+    chown "$_vm_user:$_vm_user" "${_vm_home}/.cloudflared/api-token"
+  fi
+  ok "CF API token saved on VM."
+fi
+
 # ── Install Docker (if missing) + Docker 29 fix ──────────────────────────────
 step "Docker install + Docker 29 compat"
 if command -v docker &>/dev/null; then
