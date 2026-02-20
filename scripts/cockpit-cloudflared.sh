@@ -106,7 +106,7 @@ cf_ensure_auth() {
       ask "Use saved token? [Y/n]:"; read -r _use
       [[ "${_use:-Y}" =~ ^[Yy]$ ]] && _token="$_stored"
     fi
-    [ -z "$_token" ] && { ask "API token:"; read -rs _token; echo ""; }
+    [ -z "$_token" ] && { ask "API token:"; read -r _token; }
     cf_store_api_token "$_token"
     export CLOUDFLARE_API_TOKEN="$_token"
     sudo -u "$CURRENT_USER" CLOUDFLARE_API_TOKEN="$_token" cloudflared tunnel login --no-browser 2>/dev/null || true

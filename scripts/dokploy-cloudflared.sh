@@ -122,7 +122,7 @@ cf_ensure_auth() {
       ask "Use saved token? [Y/n]:"; read -r _use
       [[ "${_use:-Y}" =~ ^[Yy]$ ]] && _token="$_stored"
     fi
-    [ -z "$_token" ] && { ask "API token:"; read -rs _token; echo ""; }
+    [ -z "$_token" ] && { ask "API token:"; read -r _token; echo ""; }
     cf_store_api_token "$_token"
     export CLOUDFLARE_API_TOKEN="$_token"
     sudo -u "$cf_user" CLOUDFLARE_API_TOKEN="$_token" cloudflared tunnel login --no-browser 2>/dev/null || true
@@ -356,7 +356,7 @@ setup_dokploy_tunnel() {
     warn "DNS auto-sync needs a CF API token (Tunnel:Edit + Zone:Read + DNS:Edit)."
     echo "  https://dash.cloudflare.com/profile/api-tokens"
     echo ""
-    ask "  CF API token (or Enter to skip):"; read -rs _tok; echo ""
+    ask "  CF API token (or Enter to skip):"; read -r _tok; echo ""
     if [ -n "$_tok" ]; then
       DOKPLOY_CF_ZONE_ID=$(cf_fetch_zone_id "$_tok" "$CF_DOMAIN" || true)
       if [ -n "$DOKPLOY_CF_ZONE_ID" ]; then
