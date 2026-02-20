@@ -627,8 +627,8 @@ step_sriov_host() {
   echo " 13   Lunar Lake                      Core Ultra 2xx (i915)"
   ask "Selection [9]: "; read -r GPU_GEN
   GPU_GEN="$(default_if_empty "$GPU_GEN" "9")"
-  ask "How many VFs? [7]: "; read -r GPU_VF_COUNT
-  GPU_VF_COUNT="$(default_if_empty "$GPU_VF_COUNT" "7")"
+  ask "How many VFs? [2]: "; read -r GPU_VF_COUNT
+  GPU_VF_COUNT="$(default_if_empty "$GPU_VF_COUNT" "2")"
 
   case "$GPU_GEN" in
     1)  GPU_DRIVER="i915"; GPU_ROM_FILE="SNB_GOPv2_igd.rom";               GPU_IGD_LPC="no"  ;;
@@ -647,10 +647,10 @@ step_sriov_host() {
     *)  GPU_DRIVER="i915"; GPU_ROM_FILE="ADL-H_RPL-H_GOPv21_igd.rom";      GPU_IGD_LPC="yes" ;;
   esac
   GPU_ROM_URL="https://github.com/LongQT-sea/intel-igpu-passthru/releases/download/v0.1/${GPU_ROM_FILE}"
-  # video=efifb:off video=vesafb:off initcall_blacklist=sysfb_init: prevents EFI framebuffer
+  # : prevents EFI framebuffer
   # from conflicting with i915-sriov in SR-IOV PF mode (fixes blank screen on boot)
   # plymouth.enable=0: Plymouth framebuffer also conflicts with i915-sriov display handoff
-  KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe video=efifb:off video=vesafb:off initcall_blacklist=sysfb_init plymouth.enable=0"
+  KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe plymouth.enable=0"
 
   # Write GPU vars to vm.conf so phase2 picks them up without re-asking
   mkdir -p "${REPO_DIR}/configs"

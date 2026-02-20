@@ -480,8 +480,8 @@ prompt_gpu() {
     GPU_PASSTHROUGH="yes"
   fi
 
-  ask "How many VFs? [7]: "; read -r GPU_VF_COUNT
-  GPU_VF_COUNT="$(default_if_empty "$GPU_VF_COUNT" "7")"
+  ask "How many VFs? [2]: "; read -r GPU_VF_COUNT
+  GPU_VF_COUNT="$(default_if_empty "$GPU_VF_COUNT" "2")"
 
   # Set ROM file, driver, kernel args, and whether x-igd-lpc is needed
   # x-igd-lpc required for Ice Lake, Rocket Lake, Tiger Lake, Alder Lake and newer
@@ -507,10 +507,10 @@ prompt_gpu() {
     # xe.force_probe required: value = output of: cat /sys/devices/pci0000:00/0000:00:02.0/device
     XE_PROBE_ID="$(cat /sys/devices/pci0000:00/0000:00:02.0/device 2>/dev/null | sed 's/^0x//' || true)"
     XE_PROBE_ID="${XE_PROBE_ID:-$(ask "Enter device ID for xe.force_probe (cat /sys/devices/pci0000:00/0000:00:02.0/device | sed s/0x//): "; read -r _p; echo "$_p")}"
-    # video=efifb:off video=vesafb:off initcall_blacklist=sysfb_init: prevents EFI framebuffer
+    # : prevents EFI framebuffer
     # conflict with i915-sriov in SR-IOV PF mode (fixes blank screen on boot)
     # plymouth.enable=0: Plymouth framebuffer also conflicts with i915-sriov display handoff
-    KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe video=efifb:off video=vesafb:off initcall_blacklist=sysfb_init plymouth.enable=0"
+    KERNEL_GPU_ARGS="i915.enable_guc=3 i915.max_vfs=${GPU_VF_COUNT} module_blacklist=xe plymouth.enable=0"
   fi
 
   # QEMU legacy-mode restriction warning (QEMU 10.1+ restricts to SNB→CML per LongQT-sea guide fn[4])

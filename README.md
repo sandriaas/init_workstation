@@ -174,12 +174,22 @@ sudo reboot
 
 # After reboot verify:
 cat /proc/cmdline | grep iommu      # → intel_iommu=on iommu=pt
-cat /proc/cmdline | grep i915       # → i915.enable_guc=3 i915.max_vfs=7
+cat /proc/cmdline | grep i915       # → i915.enable_guc=3 i915.max_vfs=2
 dkms status                         # → i915-sriov-dkms/..., <kernel>: installed
-cat /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs  # → 7
+cat /sys/devices/pci0000:00/0000:00:02.0/sriov_numvfs  # → 2 (default)
 docker run --rm hello-world         # → works without sudo
 systemctl status cloudflared        # → active (running)
 ```
+
+### Troubleshooting: Blank Screen on Boot (Alder Lake + SR-IOV)
+
+If you experience a blank screen after the CachyOS logo when booting the LTS kernel (required for `i915-sriov-dkms`):
+
+1. **Reduce VFs:** High VF counts (e.g. 7) can cause resource contention on the host display. The scripts now default to **2 VFs** to ensure stability.
+2. **Remove Framebuffer Args:** Do **NOT** use `video=efifb:off video=vesafb:off`. These arguments disable the display fallback, leaving you with a black screen if the i915 driver hangs during initialization.
+3. **Check Kernel:** Ensure you are booting the LTS kernel (`linux-cachyos-lts`) as `i915-sriov-dkms` is often not built for the latest rolling kernel.
+
+The scripts have been updated to reflect these fixes automatically.
 
 ---
 
