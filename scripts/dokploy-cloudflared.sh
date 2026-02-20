@@ -102,8 +102,17 @@ cf_ensure_auth() {
     ok "Cloudflare auth confirmed."; return
   fi
   warn "Not authenticated with Cloudflare."
-  echo "  1) Browser login (recommended)"
-  echo "  2) API token"
+  echo ""
+  echo "  1) Browser login"
+  echo "  2) API token  ← recommended (one token for tunnels + DNS auto-sync)"
+  echo ""
+  echo "  For option 2, create a token at:"
+  echo "    https://dash.cloudflare.com/profile/api-tokens"
+  echo "  Required permissions:"
+  echo "    • Account > Cloudflare Tunnel > Edit"
+  echo "    • Zone > Zone > Read"
+  echo "    • Zone > DNS > Edit"
+  echo ""
   local _stored; _stored=$(cf_load_api_token)
   [ -n "$_stored" ] && echo "  ✓ Saved token detected"
   ask "Choice [1/2]:"; read -r _auth
@@ -344,11 +353,10 @@ setup_dokploy_tunnel() {
   fi
   if [ -z "$DOKPLOY_CF_ZONE_ID" ]; then
     echo ""
-    warn "DNS auto-sync needs a CF API token with Zone:Read + DNS:Edit permissions."
-    echo "  Create one at: https://dash.cloudflare.com/profile/api-tokens"
-    echo "  Use template: 'Edit zone DNS' → restrict to zone: ${CF_DOMAIN}"
+    warn "DNS auto-sync needs a CF API token (Tunnel:Edit + Zone:Read + DNS:Edit)."
+    echo "  https://dash.cloudflare.com/profile/api-tokens"
     echo ""
-    ask "  CF API token (or Enter to skip auto-sync):"; read -rs _tok; echo ""
+    ask "  CF API token (or Enter to skip):"; read -rs _tok; echo ""
     if [ -n "$_tok" ]; then
       DOKPLOY_CF_ZONE_ID=$(cf_fetch_zone_id "$_tok" "$CF_DOMAIN" || true)
       if [ -n "$DOKPLOY_CF_ZONE_ID" ]; then
@@ -356,7 +364,7 @@ setup_dokploy_tunnel() {
         cf_store_api_token "$_tok"
         ok "CF Zone ID: ${DOKPLOY_CF_ZONE_ID}"
       else
-        warn "Could not fetch Zone ID with that token — DNS auto-sync will be disabled."
+        warn "Could not fetch Zone ID — check token permissions. DNS auto-sync disabled."
       fi
     else
       warn "Skipping DNS auto-sync — use 'add-domain' subcommand for manual CNAME creation."

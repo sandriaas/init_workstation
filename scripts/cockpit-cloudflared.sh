@@ -90,8 +90,13 @@ cf_ensure_auth() {
     ok "Cloudflare auth confirmed."; return
   fi
   warn "Not authenticated with Cloudflare."
-  echo "  1) Browser login (recommended)"
-  echo "  2) API token"
+  echo ""
+  echo "  1) Browser login"
+  echo "  2) API token  ← recommended (one token for tunnels + DNS)"
+  echo ""
+  echo "  For option 2, create at: https://dash.cloudflare.com/profile/api-tokens"
+  echo "  Required: Account > Cloudflare Tunnel > Edit | Zone > Zone > Read | Zone > DNS > Edit"
+  echo ""
   local _stored; _stored=$(cf_load_api_token)
   [ -n "$_stored" ] && echo "  ✓ Saved token detected"
   ask "Choice [1/2]:"; read -r _auth
