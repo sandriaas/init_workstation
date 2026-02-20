@@ -283,14 +283,36 @@ setup_dokploy_tunnel() {
   ok "Tunnel ID: ${DOKPLOY_TUNNEL_ID}"
 
   step "Step 5: DNS routes"
+  local _expected_target="${DOKPLOY_TUNNEL_ID}.cfargotunnel.com"
+
+  # Helper: check if existing CNAME points to the correct tunnel
+  _check_dns_cname() {
+    local _host="$1"
+    local _current; _current=$(dig +short CNAME "${_host}" 2>/dev/null | head -1 | sed 's/\.$//')
+    if [ -n "$_current" ] && [ "$_current" != "$_expected_target" ]; then
+      warn "DNS '${_host}' exists but points to WRONG tunnel:"
+      warn "  Current:  ${_current}"
+      warn "  Expected: ${_expected_target}"
+      warn "  ⚠  Manually update this CNAME in Cloudflare Dashboard!"
+      return 1
+    fi
+    return 0
+  }
+
   # Dashboard: specific record
-  sudo -u "$cf_user" cloudflared tunnel route dns "${DOKPLOY_TUNNEL_NAME}" "${_dash_sub}.${CF_DOMAIN}" 2>/dev/null \
-    && ok "DNS: ${_dash_sub}.${CF_DOMAIN}" \
-    || warn "DNS route failed (may already exist): ${_dash_sub}.${CF_DOMAIN}"
+  if sudo -u "$cf_user" cloudflared tunnel route dns "${DOKPLOY_TUNNEL_NAME}" "${_dash_sub}.${CF_DOMAIN}" 2>/dev/null; then
+    ok "DNS: ${_dash_sub}.${CF_DOMAIN}"
+  else
+    _check_dns_cname "${_dash_sub}.${CF_DOMAIN}" \
+      || warn "DNS route exists but points to wrong tunnel — update manually."
+  fi
   # Wildcard: all app subdomains → Traefik
-  sudo -u "$cf_user" cloudflared tunnel route dns "${DOKPLOY_TUNNEL_NAME}" "*.${CF_DOMAIN}" 2>/dev/null \
-    && ok "DNS: *.${CF_DOMAIN}" \
-    || warn "DNS wildcard route failed (may already exist): *.${CF_DOMAIN}"
+  if sudo -u "$cf_user" cloudflared tunnel route dns "${DOKPLOY_TUNNEL_NAME}" "*.${CF_DOMAIN}" 2>/dev/null; then
+    ok "DNS: *.${CF_DOMAIN}"
+  else
+    _check_dns_cname "*.${CF_DOMAIN}" \
+      || warn "Wildcard DNS points to wrong tunnel — update manually."
+  fi
 
   # Base64-encode credentials for VM
   local creds_home; creds_home="$(eval echo ~${cf_user})"
