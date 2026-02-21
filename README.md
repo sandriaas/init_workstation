@@ -1,6 +1,6 @@
 # init_workstation — Rev5.7.2
 
-> Zero-to-hero workstation setup: CachyOS host → Cloudflare SSH tunnel → KVM Ubuntu VM with Intel iGPU SR-IOV passthrough
+> Zero-to-hero workstation setup: CachyOS host → Cloudflare SSH tunnel → KVM Ubuntu VM with Intel iGPU SR-IOV passthrough → Dokploy PaaS
 
 **Machine:** Intel Core i9-12900H · 24GB RAM · CachyOS (Limine bootloader, BTRFS)
 **Domain:** `easyrentbali.com` (Cloudflare) · **User:** `sandriaas`
@@ -24,8 +24,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/m
 # Phase 3: Configure VM internals (SSH, cloudflared, static IP, i915-sriov-dkms)
 bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3.sh)
 
-# Client: configure SSH on your phone/laptop to connect via Cloudflare tunnel
+# Host SSH client: configure SSH on your phone/laptop to connect to the host
 bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)
+
+# VM SSH client: configure SSH on your phone/laptop to connect to the VM
+bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3-client.sh)
 ```
 
 ### Option B — git clone and run locally
@@ -49,8 +52,27 @@ sudo bash scripts/phase2.sh
 # Phase 3
 sudo bash scripts/phase3.sh
 
-# Client (no sudo needed)
+# Client SSH — host
 bash scripts/phase1-client.sh
+
+# Client SSH — VM
+bash scripts/phase3-client.sh
+```
+
+### Standalone scripts (run independently, after Phase 3)
+
+```bash
+# Cockpit + SSH tunnel on host (alternative to Phase 1's tunnel)
+sudo bash scripts/cockpit-cloudflared.sh
+
+# Dokploy + Cloudflare app tunnel on VM (deploys PaaS platform)
+sudo bash scripts/dokploy-cloudflared.sh
+
+# Add a DNS record for a new Dokploy app
+sudo bash scripts/dokploy-cloudflared.sh add-domain myapp
+
+# Verify the entire setup (read-only)
+bash scripts/check.sh
 ```
 
 ### Script flow
@@ -80,10 +102,60 @@ phase1.sh ───────────────────────�
                                   static IP + cloudflared install + token
                                   enables cloudflared autostart in VM
 
-phase1-client.sh  (run on phone/laptop/desktop)
+cockpit-cloudflared.sh ─────────────────────────── standalone
+  └─ install cloudflared on host
+     auth (browser / API token, reuses saved creds)
+     create/reuse tunnel "minipc-ssh"
+     route DNS: ssh.domain → :22, cockpit.domain → :9090
+     wrong-tunnel CNAME detection + auto-fix
+     install systemd service
+
+dokploy-cloudflared.sh ─────────────────────────── standalone (run after phase3)
+  └─ select VM conf
+     install cloudflared on host (if missing)
+     auth (reuses saved creds)
+     create tunnel "dokploy-<vmname>"
+     SSH into VM → install Dokploy
+     deploy cloudflared container (host network → localhost:80)
+     install DNS auto-sync watcher (systemd service)
+       └─ docker events → instant CNAME creation (~2s)
+          periodic full scan every 60s (fallback)
+     subcommand: add-domain <sub> → manual CNAME creation
+
+phase1-client.sh / phase1-client.ps1  (host SSH)
   └─ install websocat + openssh
-     write ~/.ssh/config → ssh minipc / ssh server-vm
+     write ~/.ssh/config → ssh minipc
+
+phase2-client.sh  (VM SSH — legacy alias)
+  └─ install websocat + openssh
+     write ~/.ssh/config → ssh server-vm
+
+phase3-client.sh / phase3-client.ps1  (VM SSH)
+  └─ install websocat + openssh
+     write ~/.ssh/config → ssh <vm-alias>
+     test SSH connection (DNS propagation tolerance)
+
+check.sh  (read-only verification)
+  └─ system specs, Phase 1/2/3 status
+     SR-IOV state, VM config, tunnel health
+     pass/fail/warn summary
 ```
+
+### All scripts
+
+| Script | Target | Purpose |
+|--------|--------|---------|
+| `phase1.sh` | Host | Packages, IOMMU, SR-IOV, sleep mask, static IP, SSH, CF tunnel |
+| `phase2.sh` | Host | Create KVM VM, GPU passthrough, virtiofs, vm.conf |
+| `phase3.sh` | Host → VM | VM packages, static IP, cloudflared tunnel, autostart |
+| `phase1-client.sh` | Any device | SSH client for host (websocat + SSH config) |
+| `phase1-client.ps1` | Windows | SSH client for host (Scoop + websocat + SSH config) |
+| `phase2-client.sh` | Any device | SSH client for VM (legacy, same as phase3-client) |
+| `phase3-client.sh` | Any device | SSH client for VM (websocat + SSH config + test) |
+| `phase3-client.ps1` | Windows | SSH client for VM (Scoop + websocat + SSH config + test) |
+| `cockpit-cloudflared.sh` | Host | Standalone CF tunnel for Cockpit (:9090) + SSH (:22) |
+| `dokploy-cloudflared.sh` | Host → VM | Install Dokploy + CF tunnel + DNS auto-sync watcher |
+| `check.sh` | Host | Read-only system verification (all phases) |
 
 ---
 
@@ -91,10 +163,12 @@ phase1-client.sh  (run on phone/laptop/desktop)
 2. [Phase 1 — Host Setup](#phase-1--host-setup)
 3. [Phase 2/3 — VM Provision + VM Setup](#phase-23--vm-provision--vm-setup)
 4. [SSH from Phone / Other Devices](#ssh-from-phone--other-devices)
-5. [Config File Backups](#config-file-backups)
-6. [Current Status](#current-status)
-7. [Next Steps](#next-steps)
-8. [Legacy Guide](#legacy-guide)
+5. [Cockpit + SSH Tunnel (Standalone)](#cockpit--ssh-tunnel-standalone)
+6. [Dokploy + Cloudflare App Tunnel](#dokploy--cloudflare-app-tunnel)
+7. [Config File Backups](#config-file-backups)
+8. [Current Status](#current-status)
+9. [Next Steps](#next-steps)
+10. [Legacy Guide](#legacy-guide)
 
 ---
 
@@ -284,29 +358,41 @@ Internet / Phone / Laptop
          │
          │  SSH via Cloudflare Tunnel
          ▼
-┌─────────────────────────────────────┐
-│  Host Machine  192.168.110.90       │  ← Physical LAN (your router)
-│  CachyOS / Arch                     │
-│                                     │
-│  cloudflared ──► b8sqa0n0v48o       │  ← Host tunnel (phase 1)
-│  .easyrentbali.com                  │
-│                                     │
-│  virbr0 NAT  192.168.122.1          │  ← libvirt internal bridge
-│       │                             │     completely separate from LAN
-│       ▼                             │
-│  ┌──────────────────────┐           │
-│  │  VM  192.168.122.50  │           │
-│  │  Ubuntu Server       │           │
-│  │                      │           │
-│  │  cloudflared ──────► │           │  ← VM tunnel (phase 3)
-│  │  vm-xxxx.easyrent..  │           │
-│  └──────────────────────┘           │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│  Host Machine  192.168.110.90           │  ← Physical LAN (your router)
+│  CachyOS / Arch                         │
+│                                         │
+│  cloudflared ──► minipc-ssh             │  ← Host tunnel (phase1 / cockpit-cloudflared)
+│    ssh.easyrentbali.com     → :22       │
+│    cockpit.easyrentbali.com → :9090     │
+│                                         │
+│  virbr0 NAT  192.168.122.1              │  ← libvirt internal bridge
+│       │                                 │
+│       ▼                                 │
+│  ┌──────────────────────────────────┐   │
+│  │  VM  192.168.122.50              │   │
+│  │  Ubuntu Server                   │   │
+│  │                                  │   │
+│  │  cloudflared ──► vm tunnel       │   │  ← VM SSH tunnel (phase 3)
+│  │    vm.easyrentbali.com → :22     │   │
+│  │                                  │   │
+│  │  cloudflared ──► dokploy tunnel  │   │  ← App tunnel (dokploy-cloudflared)
+│  │    dokploy.domain   → :3000     │   │     cloudflared container (host net)
+│  │    *.domain         → :80       │   │     Traefik routes to app containers
+│  │                                  │   │
+│  │  Dokploy (:3000)                 │   │  ← PaaS dashboard
+│  │  Traefik (:80)                   │   │  ← Reverse proxy for all apps
+│  │  dokploy-dns-sync (systemd)      │   │  ← Auto-creates CF CNAMEs
+│  └──────────────────────────────────┘   │
+└─────────────────────────────────────────┘
+
+App traffic flow:
+  Browser → CF CDN → CF Tunnel → cloudflared → Traefik:80 → app container
 ```
 
-> **Why two separate IPs?**  
-> The VM (`192.168.122.x`) lives on libvirt's private NAT bridge — it has no direct LAN presence.  
-> External SSH access always goes through the VM's Cloudflare tunnel, so the VM never needs a LAN IP.  
+> **Why two separate IPs?**
+> The VM (`192.168.122.x`) lives on libvirt's private NAT bridge — it has no direct LAN presence.
+> External SSH access always goes through the VM's Cloudflare tunnel, so the VM never needs a LAN IP.
 > The host IP (`192.168.110.90`) is only used for local management.
 
 ## Phase 2/3 — VM Provision + VM Setup
@@ -320,26 +406,28 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/m
 # Phase 3: configure inside VM (SSH, static IP, cloudflared tunnel — automated)
 bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3.sh)
 
-# Client side for VM tunnel
-bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase2-client.sh)
+# Client side for VM SSH tunnel (run on your phone/laptop/desktop)
+bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3-client.sh)
 ```
 
-`phase2.sh` writes `configs/vm.conf` and reuses it in `phase3.sh`.
+`phase2.sh` writes `generated-vm/<name>.conf` and reuses it in `phase3.sh`.
 
 ---
 
 ## SSH from Phone / Other Devices
 
-Run `phase1-client.sh` on any device you want to SSH from.
-It detects the OS, installs websocat + openssh, and writes `~/.ssh/config`.
+### Host SSH — `phase1-client.sh`
 
-### Run
+Run on any device to SSH into the **host machine** via Cloudflare tunnel.
+Detects OS (Arch · Ubuntu/Debian · Fedora · macOS · Android/Termux), installs websocat + openssh, writes `~/.ssh/config`.
+
+#### Unix/macOS/Android (Termux)
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)
 ```
 
-### Windows (PowerShell)
+#### Windows (PowerShell)
 
 ```powershell
 irm "https://api.github.com/repos/sandriaas/init_workstation/contents/scripts/phase1-client.ps1" | % { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_.content)) } | iex
@@ -347,22 +435,137 @@ irm "https://api.github.com/repos/sandriaas/init_workstation/contents/scripts/ph
 
 > Installs Scoop, winget, websocat, and OpenSSH client automatically.
 
-### Android (Termux from [F-Droid](https://f-droid.org/packages/com.termux/))
+Then: `ssh minipc`
+
+### VM SSH — `phase3-client.sh`
+
+Run on any device to SSH into the **KVM VM** via Cloudflare tunnel.
+Same OS detection + websocat + openssh install. Tests SSH connection with DNS propagation tolerance (~2 min).
+
+#### Unix/macOS/Android (Termux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh | bash
+bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3-client.sh)
+```
+
+#### Windows (PowerShell)
+
+```powershell
+irm "https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase3-client.ps1" | iex
+```
+
+Then: `ssh server-vm` (or the alias you chose)
+
+### Legacy VM client — `phase2-client.sh`
+
+Same as `phase3-client.sh` but with Host alias `server-vm`. Kept for backward compatibility.
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase2-client.sh)
 ```
 
 ### Manual `~/.ssh/config`
 
 ```
+# Host machine
 Host minipc
   HostName b8sqa0n0v48o.easyrentbali.com
   ProxyCommand websocat -E --binary - wss://%h
   User sandriaas
+
+# VM
+Host server-vm
+  HostName vm-subdomain.easyrentbali.com
+  ProxyCommand websocat -E --binary - wss://%h
+  User sandriaas
 ```
 
-Then: `ssh minipc`
+---
+
+## Cockpit + SSH Tunnel (Standalone)
+
+`cockpit-cloudflared.sh` sets up a dedicated Cloudflare tunnel for **host Cockpit** (web UI on `:9090`) and **SSH** (`:22`). Runs independently of Phase 1's tunnel — useful if you want separate tunnels for different services.
+
+```bash
+sudo bash scripts/cockpit-cloudflared.sh
+```
+
+**What it does:**
+
+1. Installs cloudflared on host (pacman/apt/dnf)
+2. Authenticates with Cloudflare (browser login or API token — reuses saved credentials)
+3. Lists domains from your CF account → select one
+4. Creates/reuses tunnel `minipc-ssh`
+5. Configures ingress: `ssh.domain → localhost:22`, `cockpit.domain → localhost:9090`
+6. Routes DNS CNAMEs (with wrong-tunnel detection — auto-detects stale CNAMEs pointing to old tunnels)
+7. Installs systemd service → tunnel starts on boot
+
+**After running:**
+
+- Cockpit: `https://cockpit.easyrentbali.com`
+- SSH: via `ssh minipc` (uses websocat ProxyCommand)
+
+---
+
+## Dokploy + Cloudflare App Tunnel
+
+`dokploy-cloudflared.sh` deploys **Dokploy** (PaaS platform) on the VM and wires all app traffic through a Cloudflare tunnel via Traefik.
+
+```bash
+# Full setup (run once, after phase3)
+sudo bash scripts/dokploy-cloudflared.sh
+
+# Add a DNS record for a new app (manual, if auto-sync misses it)
+sudo bash scripts/dokploy-cloudflared.sh add-domain myapp
+```
+
+**What it does:**
+
+1. Selects VM config (`generated-vm/*.conf`)
+2. Verifies VM is reachable via SSH
+3. Authenticates with Cloudflare (reuses saved API token)
+4. Creates tunnel `dokploy-<vmname>`
+5. SSHs into VM → installs Dokploy + deploys cloudflared container
+6. Configures ingress: `dokploy.domain → localhost:3000`, `*.domain → localhost:80` (Traefik)
+7. Installs **DNS auto-sync watcher** (systemd service on VM)
+
+### DNS Auto-Sync Watcher
+
+The `dokploy-dns-sync` systemd service runs on the VM and **automatically creates Cloudflare CNAME records** for new app domains deployed in Dokploy.
+
+- **Instant detection** — listens to `docker events` and creates CNAMEs within ~2 seconds of container start
+- **Periodic fallback** — full scan of all containers every 60 seconds
+- **Idempotent** — tracks created records in `/var/lib/dokploy-dns-sync/` to avoid duplicate API calls
+- **Self-healing** — reconnects automatically if Docker daemon restarts
+
+**Flow:** Deploy app in Dokploy → add domain `myapp.easyrentbali.com` (port 80, HTTP) → watcher auto-creates CF CNAME → app is live at `https://myapp.easyrentbali.com`
+
+**No manual DNS steps required** after initial setup.
+
+### First-time Dokploy setup (after script runs)
+
+1. Open `http://<VM_IP>:3000` → Settings → General → Server Domain → `dokploy.easyrentbali.com`
+2. Settings → Traefik → Disable Let's Encrypt (Cloudflare handles SSL) → Entrypoint: `web` (HTTP port 80)
+3. Cloudflare Dashboard → SSL/TLS → set to **Full** (not Flexible)
+
+### `add-domain` subcommand
+
+Manually create a CF CNAME for a new app (if auto-sync doesn't cover it):
+
+```bash
+sudo bash scripts/dokploy-cloudflared.sh add-domain n8n-test
+# Creates CNAME: n8n-test.easyrentbali.com → tunnel
+```
+
+### Cloudflare API Token Permissions
+
+One token covers everything (tunnels, DNS routing, DNS auto-sync):
+
+- Account → Cloudflare Tunnel → **Edit**
+- Zone → Zone → **Read**
+- Zone → DNS → **Edit**
+
+Token is saved on both host (`~/.cloudflared/api-token`) and VM for reuse across all scripts.
 
 ---
 
@@ -372,10 +575,21 @@ Copies saved in `configs/` for reference and restore.
 
 | File | Original Path | Description |
 |------|---------------|-------------|
-| `cloudflared-config.yml` | `~/.cloudflared/config.yml` | Tunnel ingress — maps `b8sqa0n0v48o.easyrentbali.com` → `ssh://localhost:22` |
+| `cloudflared-config.yml` | `~/.cloudflared/config.yml` | Tunnel ingress — maps hostname → `ssh://localhost:22` |
 | `ssh-config` | `~/.ssh/config` | SSH client alias with websocat ProxyCommand |
 | `limine-default` | `/etc/default/limine` | Bootloader cmdline — includes `intel_iommu=on iommu=pt` |
 | `cloudflared.service` | `/etc/systemd/system/cloudflared.service` | systemd unit for cloudflared daemon |
+| `vm.conf` | Generated by phase2 | Template VM config (CPU, RAM, disk, GPU, tunnel) |
+| `vm.conf.example` | — | Example with all available fields documented |
+| `macos-vm.conf` | — | macOS VM config (Haswell-noTSX, vmware-svga, OpenCore) |
+| `windows-vm.conf` | — | Windows 11 VM config (VF #2, virtio-win drivers) |
+
+Generated configs (per-VM, created by phase2/3):
+
+| File | Description |
+|------|-------------|
+| `generated-vm/<name>.conf` | VM-specific config with tunnel IDs, IPs, GPU assignment |
+| `generated-vm/.state` | Phase completion tracking |
 
 ---
 
@@ -384,14 +598,17 @@ Copies saved in `configs/` for reference and restore.
 | Item | Status |
 |------|--------|
 | Packages (docker, fail2ban, etc.) | ✅ Installed & enabled |
-| `sandriaas` in docker group | ✅ Set (active after reboot) |
+| `sandriaas` in docker group | ✅ Active |
 | Sleep targets masked | ✅ Done |
-| IOMMU in Limine cmdline | ✅ Set (active after reboot) |
+| IOMMU + SR-IOV kernel args | ✅ Active |
 | Static IP | ✅ Configured |
-| BTRFS snapshot | ✅ `/snapshots/pre-phase1-20260219-134445` |
-| Cloudflare tunnel `minipc-ssh` | ✅ Live |
-| DNS `b8sqa0n0v48o.easyrentbali.com` | ✅ CNAME → tunnel |
-| Terminal SSH via websocat | ✅ Working |
+| Host Cloudflare tunnel | ✅ Live |
+| KVM VM (vm_1) | ✅ Running, autostart enabled |
+| VM Cloudflare tunnel | ✅ Live |
+| Dokploy | ✅ Deployed on VM |
+| Dokploy app tunnel | ✅ Live (cloudflared container, host network) |
+| DNS auto-sync watcher | ✅ Running (docker events + 60s poll) |
+| Terminal SSH via websocat | ✅ Working (host + VM) |
 
 ---
 
@@ -399,10 +616,10 @@ Copies saved in `configs/` for reference and restore.
 
 | Priority | Action |
 |----------|--------|
-| **Now** | `sudo reboot` → activate IOMMU + docker group |
-| **Verify** | `cat /proc/cmdline \| grep iommu` · `docker run --rm hello-world` · `systemctl status cloudflared` |
-| **Phase 2/3** | Run `phase2.sh` then `phase3.sh` for VM + tunnel setup |
+| **Verify** | `bash scripts/check.sh` — full system audit |
+| **Dokploy** | Deploy apps, add domains — DNS auto-sync handles CNAMEs |
 | **Phase 5** | Security hardening — fail2ban tuning, UFW |
+| **Phase 6+** | RustDesk, Server HUD, backups (see Legacy Guide) |
 
 ---
 
