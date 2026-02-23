@@ -6,6 +6,9 @@
 
 set -euo pipefail
 
+# Ensure virsh connects to system URI (not session) so VMs are visible to all users
+export LIBVIRT_DEFAULT_URI="qemu:///system"
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
 info()    { echo -e "${CYAN}[INFO]${RESET} $*"; }
 ok()      { echo -e "${GREEN}[OK]${RESET}  $*"; }
@@ -1035,6 +1038,10 @@ create_vm() {
 
   sudo mkdir -p "$(dirname "$VM_DISK_PATH")" "$SHARED_DIR"
   sudo chown -R "${CURRENT_USER}:${CURRENT_USER}" "$SHARED_DIR"
+
+  # Ensure libvirtd daemon is running and enabled (socket-only activation won't autostart VMs on boot)
+  sudo systemctl enable --now libvirtd || true
+
   sudo virsh net-autostart default >/dev/null 2>&1 || true
   sudo virsh net-start default >/dev/null 2>&1 || true
 

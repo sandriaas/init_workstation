@@ -353,8 +353,18 @@ step_packages() {
   sudo systemctl enable --now docker
   apply_docker_min_api_version
   sudo systemctl enable --now fail2ban
-  sudo systemctl enable --now libvirtd.socket || sudo systemctl enable --now libvirtd || true
+  # Enable libvirtd daemon (not just socket) so VM autostart works on boot
+  sudo systemctl enable --now libvirtd || true
+  sudo systemctl enable --now libvirtd.socket || true
   sudo systemctl enable --now cockpit.socket || true
+
+  # Set default libvirt URI to system so virsh works without --connect for all users
+  if [ -f "/home/${CURRENT_USER}/.config/fish/config.fish" ]; then
+    grep -q "LIBVIRT_DEFAULT_URI" "/home/${CURRENT_USER}/.config/fish/config.fish" || \
+      echo 'set -x LIBVIRT_DEFAULT_URI qemu:///system' >> "/home/${CURRENT_USER}/.config/fish/config.fish"
+  fi
+  grep -q "LIBVIRT_DEFAULT_URI" "/home/${CURRENT_USER}/.bashrc" 2>/dev/null || \
+    echo 'export LIBVIRT_DEFAULT_URI="qemu:///system"' >> "/home/${CURRENT_USER}/.bashrc"
 
   # Add user to required groups (active after reboot)
   for grp in docker libvirt kvm; do
