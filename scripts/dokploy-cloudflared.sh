@@ -557,12 +557,29 @@ scan_all() {
       found=1
     done
   done
+  # Swarm services (Dokploy)
+  scan_all_services
   return 0
 }
 
 scan_container() {
   local cid="$1"
   for host in $(docker inspect "$cid" 2>/dev/null | grep -oP 'Host\(`\K[^`]+' || true); do
+    process_hostname "$host"
+  done
+}
+
+scan_all_services() {
+  for sid in $(docker service ls -q 2>/dev/null); do
+    for host in $(docker service inspect "$sid" 2>/dev/null | grep -oP 'Host\(`\K[^`]+' || true); do
+      process_hostname "$host"
+    done
+  done
+}
+
+scan_service() {
+  local sid="$1"
+  for host in $(docker service inspect "$sid" 2>/dev/null | grep -oP 'Host\(`\K[^`]+' || true); do
     process_hostname "$host"
   done
 }
@@ -579,7 +596,25 @@ scan_all
   done
 ) &
 POLL_PID=$!
-trap 'kill $POLL_PID 2>/dev/null; exit 0' TERM INT
+
+# ── background: react to docker swarm service create/update events instantly ──
+(
+  while true; do
+    docker events --filter 'type=service' \
+                  --filter 'event=create' --filter 'event=update' \
+                  --format '{{.Actor.ID}}' 2>/dev/null \
+    | while read -r sid; do
+      sleep 2
+      log "Service created/updated: ${sid:0:12}"
+      scan_service "$sid"
+    done
+    warn "docker service events disconnected, reconnecting in 5s..."
+    sleep 5
+  done
+) &
+SERVICE_PID=$!
+
+trap 'kill $POLL_PID $SERVICE_PID 2>/dev/null; exit 0' TERM INT
 
 # ── foreground: react to docker container start/update events instantly ──
 while true; do
