@@ -179,20 +179,55 @@ cf_ensure_auth() {
   fi
 }
 
-# ─── Check existing DNS CNAME ─────────────────────────────────────────────────
-_check_dns_cname() {
-  local host="$1" expected="$2"
-  local current
-  current=$(dig +short CNAME "$host" 2>/dev/null | sed 's/\.$//')
-  if [ -z "$current" ]; then
-    return 0  # no CNAME — safe to create
+# ─── Cloudflare API: zone + CNAME helpers ─────────────────────────────────────
+# cloudflared tunnel route dns can't override wildcard CNAMEs, so we use the
+# Cloudflare API directly — specific records always take priority over wildcards.
+cf_fetch_zone_id() {
+  local token="$1" domain="$2"
+  [ -z "$token" ] || [ -z "$domain" ] && return 1
+  curl -sf -H "Authorization: Bearer $token" \
+    "https://api.cloudflare.com/client/v4/zones?name=${domain}&status=active" \
+    | grep -oP '"id"\s*:\s*"\K[^"]+' | head -1
+}
+
+_cf_api_create_cname() {
+  local token="$1" zone_id="$2" hostname="$3" target="$4"
+  # Check if record already exists
+  local existing
+  existing=$(curl -sf -H "Authorization: Bearer $token" \
+    "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records?name=${hostname}&type=CNAME" 2>/dev/null)
+
+  local record_id
+  record_id=$(echo "$existing" | grep -oP '"id"\s*:\s*"\K[^"]+' | head -1 || true)
+  local existing_content
+  existing_content=$(echo "$existing" | grep -oP '"content"\s*:\s*"\K[^"]+' | head -1 || true)
+
+  if [ -n "$record_id" ]; then
+    if [ "$existing_content" = "$target" ]; then
+      ok "CNAME already correct: ${hostname}"
+      return 0
+    fi
+    # Update existing record to point to correct tunnel
+    info "Updating CNAME: ${hostname} → ${target}"
+    curl -sf -X PUT \
+      -H "Authorization: Bearer $token" \
+      -H "Content-Type: application/json" \
+      --data "{\"type\":\"CNAME\",\"name\":\"${hostname}\",\"content\":\"${target}\",\"proxied\":true}" \
+      "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records/${record_id}" \
+      | grep -q '"success":true' && ok "Updated CNAME: ${hostname}" && return 0
+    warn "Failed to update CNAME: ${hostname}"
+    return 1
   fi
-  if [ "$current" = "$expected" ]; then
-    ok "CNAME already correct: $host → $current"
-    return 0
-  fi
-  warn "CNAME exists for $host → $current (expected $expected)"
-  warn "Update it manually in Cloudflare Dashboard if needed."
+
+  # Create new record
+  info "Creating CNAME: ${hostname} → ${target}"
+  curl -sf -X POST \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    --data "{\"type\":\"CNAME\",\"name\":\"${hostname}\",\"content\":\"${target}\",\"proxied\":true}" \
+    "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records" \
+    | grep -q '"success":true' && ok "Created CNAME: ${hostname}" && return 0
+  warn "Failed to create CNAME: ${hostname}"
   return 1
 }
 
@@ -274,18 +309,33 @@ setup_local_tunnel() {
   chown "$CURRENT_USER:$CURRENT_USER" "$CONFIG_FILE"
   ok "Config: ${CONFIG_FILE}"
 
-  # ── DNS CNAMEs ──
+  # ── DNS CNAMEs (via CF API — cloudflared route dns can't override wildcards) ──
   step "Creating DNS CNAME records"
   local TUNNEL_TARGET="${TUNNEL_ID}.cfargotunnel.com"
-  for svc in "${LOCAL_SERVICES[@]}"; do
-    local port="${svc%%:*}"
-    local hostname="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
-    if _check_dns_cname "$hostname" "$TUNNEL_TARGET"; then
+  local _api_token; _api_token=$(cf_load_api_token)
+  local _zone_id=""
+
+  if [ -n "$_api_token" ]; then
+    _zone_id=$(cf_fetch_zone_id "$_api_token" "$CF_DOMAIN" || true)
+  fi
+
+  if [ -n "$_zone_id" ] && [ -n "$_api_token" ]; then
+    for svc in "${LOCAL_SERVICES[@]}"; do
+      local port="${svc%%:*}"
+      local hostname="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
+      _cf_api_create_cname "$_api_token" "$_zone_id" "$hostname" "$TUNNEL_TARGET" || true
+    done
+  else
+    warn "No CF API token or zone ID — falling back to cloudflared route dns"
+    warn "(This won't work if a wildcard *.${CF_DOMAIN} exists)"
+    for svc in "${LOCAL_SERVICES[@]}"; do
+      local port="${svc%%:*}"
+      local hostname="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
       sudo -u "$CURRENT_USER" cloudflared tunnel route dns "${TUNNEL_NAME}" "${hostname}" 2>/dev/null \
         && ok "CNAME: ${hostname}" \
         || warn "Route DNS failed for ${hostname} — may already exist"
-    fi
-  done
+    done
+  fi
 
   # ── Systemd service ──
   step "Installing systemd service"
@@ -380,10 +430,16 @@ cmd_add_port() {
 
   # Create DNS CNAME
   local TUNNEL_TARGET="${TUNNEL_ID}.cfargotunnel.com"
-  if _check_dns_cname "$hostname" "$TUNNEL_TARGET"; then
+  local _api_token; _api_token=$(cf_load_api_token)
+  local _zone_id=""
+  [ -n "$_api_token" ] && _zone_id=$(cf_fetch_zone_id "$_api_token" "$CF_DOMAIN" || true)
+
+  if [ -n "$_zone_id" ] && [ -n "$_api_token" ]; then
+    _cf_api_create_cname "$_api_token" "$_zone_id" "$hostname" "$TUNNEL_TARGET" || true
+  else
     sudo -u "$CURRENT_USER" cloudflared tunnel route dns "${TUNNEL_NAME}" "${hostname}" 2>/dev/null \
       && ok "CNAME: ${hostname}" \
-      || warn "Route DNS failed for ${hostname} — may already exist"
+      || warn "Route DNS failed for ${hostname} — use CF Dashboard to create CNAME manually"
   fi
 
   # Restart service
