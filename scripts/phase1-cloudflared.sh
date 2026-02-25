@@ -47,8 +47,11 @@ LOCAL_SERVICES=(
   "3000:dev-3000"
   "3001:dev-3001"
   "3002:dev-3002"
+  "4141:dev-4141"
   "5174:dev-5174"
 )
+# Dev port labels (prefix "dev-") get httpHostHeader overridden to localhost:<port>
+# so Vite/bun dev servers don't reject the tunnel hostname via allowedHosts check.
 
 # ─── User / path detection ────────────────────────────────────────────────────
 CURRENT_USER="${SUDO_USER:-$USER}"
@@ -321,9 +324,15 @@ setup_local_tunnel() {
     echo "ingress:"
     for svc in "${LOCAL_SERVICES[@]}"; do
       local port="${svc%%:*}"
+      local label="${svc#*:}"
       local hostname="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
       echo "  - hostname: ${hostname}"
       echo "    service: http://localhost:${port}"
+      # Dev ports: override Host header to localhost so Vite allowedHosts check passes
+      if [[ "$label" == dev-* ]]; then
+        echo "    originRequest:"
+        echo "      httpHostHeader: localhost:${port}"
+      fi
     done
     echo "  - service: http_status:404"
   } > "$CONFIG_FILE"
