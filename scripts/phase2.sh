@@ -1045,6 +1045,32 @@ create_vm() {
   sudo virsh net-autostart default >/dev/null 2>&1 || true
   sudo virsh net-start default >/dev/null 2>&1 || true
 
+  # ── OOM protection: protect QEMU processes from the kernel OOM killer ──────
+  # libvirt calls /etc/libvirt/hooks/qemu on every VM start; we use it to set
+  # oom_score_adj=-800 so QEMU is the last thing the kernel kills under pressure.
+  sudo mkdir -p /etc/libvirt/hooks
+  if [ ! -f /etc/libvirt/hooks/qemu ]; then
+    sudo tee /etc/libvirt/hooks/qemu > /dev/null <<'QEMUHOOK'
+#!/usr/bin/env bash
+# /etc/libvirt/hooks/qemu — protect QEMU VMs from OOM killer
+# Invoked by libvirt as: qemu <vm_name> started begin -
+VM="$1"; EVENT="$2"; SUB="$3"
+[ "$EVENT" = "started" ] && [ "$SUB" = "begin" ] || exit 0
+sleep 1
+PID_FILE="/run/libvirt/qemu/${VM}.pid"
+[ -f "$PID_FILE" ] || PID_FILE="/var/run/libvirt/qemu/${VM}.pid"
+[ -f "$PID_FILE" ] || exit 0
+PID=$(cat "$PID_FILE")
+[ -n "$PID" ] && [ -d "/proc/$PID" ] || exit 0
+echo -800 > "/proc/$PID/oom_score_adj"
+logger -t libvirt-hooks "OOM-protected VM '${VM}' (PID=${PID}, oom_score_adj=-800)"
+QEMUHOOK
+    sudo chmod +x /etc/libvirt/hooks/qemu
+    ok "OOM protection hook installed: /etc/libvirt/hooks/qemu (oom_score_adj=-800)"
+  else
+    ok "OOM protection hook already present: /etc/libvirt/hooks/qemu"
+  fi
+
   if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     ok "VM '${VM_NAME}' already exists. Skipping."
   else
