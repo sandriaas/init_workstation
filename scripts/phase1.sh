@@ -611,6 +611,17 @@ EOF
   echo "$CURRENT_USER"  > /tmp/phase1_tunnel_user
 }
 
+step_cloudflare_local_tunnel() {
+  if [ -f "${SCRIPT_DIR}/phase1-cloudflared.sh" ]; then
+    section "Step 5b: Local Dev Tunnel (cockpit / netdata / bun dev)"
+    confirm "Set up local services tunnel (cockpit, netdata, dev ports)?" || { info "Skipped."; return; }
+    bash "${SCRIPT_DIR}/phase1-cloudflared.sh" \
+      || warn "Local dev tunnel setup failed — run manually: sudo bash scripts/phase1-cloudflared.sh"
+  else
+    warn "phase1-cloudflared.sh not found — skipping local dev tunnel."
+  fi
+}
+
 
 # =============================================================================
 # Helper: check dkms kernel compat and auto-set default boot if needed
@@ -1039,7 +1050,7 @@ main() {
   check_requirements
 
   echo ""
-  info "Steps: packages → sleep → static IP → SSH → Cloudflare tunnel → iGPU SR-IOV+IOMMU"
+  info "Steps: packages → sleep → static IP → SSH → CF tunnel → CF local tunnel → iGPU SR-IOV+IOMMU"
   confirm "Proceed with Phase 1 setup?" || { echo "Aborted."; exit 0; }
 
   _snap_pre "phase1 host setup start"
@@ -1048,6 +1059,7 @@ main() {
   step_static_ip
   step_ssh
   step_cloudflare_tunnel
+  step_cloudflare_local_tunnel
   step_sriov_host
   _snap_post "phase1 host setup complete"
   print_final_summary
