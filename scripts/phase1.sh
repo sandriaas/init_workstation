@@ -493,8 +493,33 @@ step_ssh() {
 # =============================================================================
 # STEP 5: Cloudflare SSH Tunnel
 # =============================================================================
+_ensure_cf_api_token() {
+  # Re-resolve paths in case USER_HOME changed since top-level assignment
+  CF_API_TOKEN_FILE="${USER_HOME}/.cloudflared/api-token"
+  CF_DOMAIN_FILE="${USER_HOME}/.cloudflared/minipc-domain"
+
+  local _token; _token=$(cf_load_api_token)
+  if [ -n "$_token" ]; then
+    ok "CF API token: saved ✓"
+    return
+  fi
+  echo ""
+  info "A Cloudflare API token is needed for creating DNS records."
+  info "Get one at: https://dash.cloudflare.com/profile/api-tokens"
+  info "Permissions needed: Zone:DNS:Edit"
+  ask "Cloudflare API token (Enter to skip): "; read -rs _token; echo ""
+  if [ -z "$_token" ]; then
+    warn "No token provided — DNS record creation will use cloudflared fallback."
+    return
+  fi
+  cf_store_api_token "$_token"
+  ok "CF API token saved."
+}
 step_cloudflare_tunnel() {
   section "Step 5: Cloudflare SSH + Cockpit Tunnel"
+
+  # Always ensure API token is saved (needed by phase1-cloudflared.sh for DNS API calls)
+  _ensure_cf_api_token
 
   if systemctl is-active cloudflared &>/dev/null; then
     ok "cloudflared already active. Skipping."; return

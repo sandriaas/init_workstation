@@ -149,34 +149,55 @@ cf_ensure_auth() {
   if [ -f "${cf_home}/.cloudflared/cert.pem" ] || \
      sudo -u "$CURRENT_USER" cloudflared tunnel list &>/dev/null; then
     ok "cloudflared already authenticated."
+  else
+    echo ""
+    info "Choose authentication method:"
+    echo "  1) Browser login (opens browser)"
+    echo "  2) API token    (headless — token from dash.cloudflare.com/profile/api-tokens)"
+    local _stored; _stored=$(cf_load_api_token)
+    [ -n "$_stored" ] && echo "  ✓ Saved API token detected"
+    ask "Choice [1/2]: "; read -r _auth_choice
+
+    if [ "${_auth_choice:-1}" = "2" ]; then
+      local _token=""
+      if [ -n "$_stored" ]; then
+        ask "Use saved API token? [Y/n]: "; read -r _use_saved
+        [[ "${_use_saved:-Y}" =~ ^[Yy]$ ]] && _token="$_stored"
+      fi
+      if [ -z "$_token" ]; then
+        ask "Cloudflare API token: "; read -rs _token; echo ""
+      fi
+      cf_store_api_token "$_token"
+      export CLOUDFLARE_API_TOKEN="$_token"
+      sudo -u "$CURRENT_USER" CLOUDFLARE_API_TOKEN="$_token" cloudflared tunnel login --no-browser 2>/dev/null \
+        || info "Falling back to token-based route DNS"
+    else
+      info "Opening Cloudflare browser login..."
+      sudo -u "$CURRENT_USER" cloudflared login
+    fi
+  fi
+
+  # ── Always ensure API token is saved (needed for DNS API calls) ──
+  cf_ensure_api_token
+}
+
+cf_ensure_api_token() {
+  local _token; _token=$(cf_load_api_token)
+  if [ -n "$_token" ]; then
+    ok "CF API token: saved ✓"
     return
   fi
-
   echo ""
-  info "Choose authentication method:"
-  echo "  1) Browser login (opens browser)"
-  echo "  2) API token    (headless — token from dash.cloudflare.com/profile/api-tokens)"
-  local _stored; _stored=$(cf_load_api_token)
-  [ -n "$_stored" ] && echo "  ✓ Saved API token detected"
-  ask "Choice [1/2]: "; read -r _auth_choice
-
-  if [ "${_auth_choice:-1}" = "2" ]; then
-    local _token=""
-    if [ -n "$_stored" ]; then
-      ask "Use saved API token? [Y/n]: "; read -r _use_saved
-      [[ "${_use_saved:-Y}" =~ ^[Yy]$ ]] && _token="$_stored"
-    fi
-    if [ -z "$_token" ]; then
-      ask "Cloudflare API token: "; read -rs _token; echo ""
-    fi
-    cf_store_api_token "$_token"
-    export CLOUDFLARE_API_TOKEN="$_token"
-    sudo -u "$CURRENT_USER" CLOUDFLARE_API_TOKEN="$_token" cloudflared tunnel login --no-browser 2>/dev/null \
-      || info "Falling back to token-based route DNS"
-  else
-    info "Opening Cloudflare browser login..."
-    sudo -u "$CURRENT_USER" cloudflared login
+  warn "Cloudflare API token is required for creating DNS records."
+  info "Get one at: https://dash.cloudflare.com/profile/api-tokens"
+  info "Permissions needed: Zone:DNS:Edit"
+  ask "Cloudflare API token: "; read -rs _token; echo ""
+  if [ -z "$_token" ]; then
+    warn "No token provided — DNS record creation may fail."
+    return
   fi
+  cf_store_api_token "$_token"
+  ok "CF API token saved."
 }
 
 # ─── Cloudflare API: zone + CNAME helpers ─────────────────────────────────────
@@ -360,6 +381,26 @@ EOF
   sudo systemctl daemon-reload
   sudo systemctl enable --now "${SERVICE_NAME}"
   ok "${SERVICE_NAME} service installed and running."
+
+  # ── Cockpit reverse-proxy config ──
+  # Cockpit needs to know it's behind a TLS-terminating proxy, otherwise its
+  # CSP headers use http:// / ws:// which browsers block as mixed content.
+  local _cockpit_hostname=""
+  for svc in "${LOCAL_SERVICES[@]}"; do
+    local port="${svc%%:*}"
+    [ "$port" = "9090" ] && { _cockpit_hostname="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"; break; }
+  done
+  if [ -n "$_cockpit_hostname" ] && command -v cockpit-bridge &>/dev/null; then
+    step "Configuring Cockpit for reverse proxy"
+    sudo tee /etc/cockpit/cockpit.conf > /dev/null << COCKPITEOF
+[WebService]
+Origins = https://${_cockpit_hostname} wss://${_cockpit_hostname}
+ProtocolHeader = X-Forwarded-Proto
+ForwardedForHeader = X-Forwarded-For
+COCKPITEOF
+    sudo systemctl restart cockpit.socket 2>/dev/null || true
+    ok "Cockpit configured: Origins = https://${_cockpit_hostname}"
+  fi
 }
 
 # =============================================================================
