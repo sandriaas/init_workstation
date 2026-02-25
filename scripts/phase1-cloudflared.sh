@@ -392,12 +392,9 @@ EOF
   done
   if [ -n "$_cockpit_hostname" ] && command -v cockpit-bridge &>/dev/null; then
     step "Configuring Cockpit for reverse proxy"
-    sudo tee /etc/cockpit/cockpit.conf > /dev/null << COCKPITEOF
-[WebService]
-Origins = https://${_cockpit_hostname} wss://${_cockpit_hostname}
-ProtocolHeader = X-Forwarded-Proto
-ForwardedForHeader = X-Forwarded-For
-COCKPITEOF
+    printf '[WebService]\nOrigins = https://%s wss://%s\nProtocolHeader = X-Forwarded-Proto\nForwardedForHeader = X-Forwarded-For\n' \
+      "${_cockpit_hostname}" "${_cockpit_hostname}" \
+      | sudo tee /etc/cockpit/cockpit.conf > /dev/null
     sudo systemctl restart cockpit.socket 2>/dev/null || true
     ok "Cockpit configured: Origins = https://${_cockpit_hostname}"
   fi
