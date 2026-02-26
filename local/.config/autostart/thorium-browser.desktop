@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Thorium Browser
+Exec=/home/sandriaas/_apps/thorium-browser_138.0.7204.303_AVX2/THORIUM-PORTABLE
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true

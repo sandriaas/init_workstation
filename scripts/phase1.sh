@@ -207,7 +207,7 @@ pkg_update() {
 
 get_packages() {
   case $OS in
-    arch)           echo "git base-devel curl wget htop net-tools openssh docker docker-compose cloudflared sysfsutils fail2ban lm_sensors websocat micro qemu-full libvirt virt-manager cockpit cockpit-machines dnsmasq" ;;
+    arch)           echo "git base-devel curl wget htop net-tools openssh docker docker-compose cloudflared sysfsutils fail2ban lm_sensors websocat micro qemu-full libvirt virt-manager cockpit cockpit-machines dnsmasq zellij ghostty" ;;
     ubuntu|proxmox) echo "git build-essential curl wget htop net-tools openssh-server docker.io docker-compose fail2ban lm-sensors qemu-kvm libvirt-daemon-system libvirt-clients virt-manager cockpit cockpit-machines dnsmasq-base bridge-utils" ;;
     fedora)         echo "git curl wget htop net-tools openssh-server docker docker-compose fail2ban lm_sensors qemu-kvm libvirt virt-install virt-manager cockpit cockpit-machines dnsmasq bridge-utils" ;;
   esac
@@ -239,6 +239,28 @@ install_websocat() {
         -o /usr/local/bin/websocat && chmod +x /usr/local/bin/websocat
       ok "websocat installed to /usr/local/bin/websocat" ;;
   esac
+}
+
+# zellij: separate install for non-Arch (binary from GitHub releases)
+install_zellij() {
+  if command -v zellij &>/dev/null; then ok "zellij already installed"; return; fi
+  info "Installing zellij..."
+  case $OS in
+    ubuntu|proxmox|fedora)
+      local ver
+      ver=$(curl -sf "https://api.github.com/repos/zellij-org/zellij/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+      curl -sL "https://github.com/zellij-org/zellij/releases/download/${ver}/zellij-x86_64-unknown-linux-musl.tar.gz" \
+        -o /tmp/zellij.tar.gz && tar -C /usr/local/bin -xzf /tmp/zellij.tar.gz zellij
+      ok "zellij installed to /usr/local/bin/zellij" ;;
+    *)
+      warn "zellij: install manually for this distro — https://github.com/zellij-org/zellij/releases" ;;
+  esac
+}
+
+# ghostty: separate install for non-Arch (must be built or installed from distro extras)
+install_ghostty() {
+  if command -v ghostty &>/dev/null; then ok "ghostty already installed"; return; fi
+  warn "ghostty: not in standard repos for $OS — install manually from https://ghostty.org/docs/install"
 }
 
 # ─── Cloudflare helpers: domain listing + selection ──────────────────────────
@@ -347,6 +369,8 @@ step_packages() {
   pkg_install $(get_packages)
   install_cloudflared   # no-op on Arch (already in get_packages)
   install_websocat      # no-op on Arch
+  install_zellij        # no-op on Arch
+  install_ghostty       # no-op on Arch (warns on non-Arch)
 
   # Enable core services
   sudo systemctl enable --now sshd || sudo systemctl enable --now ssh || true
@@ -389,6 +413,53 @@ step_packages() {
 }
 
 # =============================================================================
+# STEP 1b: Terminal Configuration (ghostty + zellij)
+# =============================================================================
+step_terminal_config() {
+  section "Step 1b: Terminal Configuration (ghostty + zellij)"
+  confirm "Configure ghostty window persistence and zellij session serialization?" || { info "Skipped."; return; }
+
+  # ghostty — persist window count/size across restarts
+  local ghostty_cfg="$USER_HOME/.config/ghostty/config"
+  mkdir -p "$(dirname "$ghostty_cfg")"
+  touch "$ghostty_cfg"
+  if grep -q "^window-save-state" "$ghostty_cfg" 2>/dev/null; then
+    ok "ghostty: window-save-state already set"
+  else
+    echo "" >> "$ghostty_cfg"
+    echo "window-save-state = always" >> "$ghostty_cfg"
+    ok "ghostty: window-save-state = always"
+  fi
+  chown "$CURRENT_USER:$CURRENT_USER" "$ghostty_cfg" 2>/dev/null || true
+
+  # zellij — session layout serialization
+  local zellij_cfg="$USER_HOME/.config/zellij/config.kdl"
+  if [ ! -f "$zellij_cfg" ]; then
+    warn "zellij config not found — generating default config"
+    mkdir -p "$(dirname "$zellij_cfg")"
+    sudo -u "$CURRENT_USER" zellij setup --dump-config > "$zellij_cfg" 2>/dev/null || true
+    chown "$CURRENT_USER:$CURRENT_USER" "$zellij_cfg" 2>/dev/null || true
+  fi
+
+  if [ -f "$zellij_cfg" ]; then
+    # Enable session_serialization
+    if grep -q "^session_serialization true" "$zellij_cfg"; then
+      ok "zellij: session_serialization already enabled"
+    else
+      sed -i 's|^// session_serialization.*|session_serialization true|; s|^session_serialization false|session_serialization true|' "$zellij_cfg"
+      ok "zellij: session_serialization = true"
+    fi
+    # Set serialization interval to 60s
+    if grep -q "^serialization_interval 60$" "$zellij_cfg"; then
+      ok "zellij: serialization_interval already 60s"
+    else
+      sed -i 's|^// serialization_interval.*|serialization_interval 60|; s|^serialization_interval [0-9]*|serialization_interval 60|' "$zellij_cfg"
+      ok "zellij: serialization_interval = 60s"
+    fi
+  else
+    warn "zellij config still missing — configure manually"
+  fi
+}
 
 
 # =============================================================================
@@ -1075,11 +1146,12 @@ main() {
   check_requirements
 
   echo ""
-  info "Steps: packages → sleep → static IP → SSH → CF tunnel → CF local tunnel → iGPU SR-IOV+IOMMU"
+  info "Steps: packages → terminal config → sleep → static IP → SSH → CF tunnel → CF local tunnel → iGPU SR-IOV+IOMMU"
   confirm "Proceed with Phase 1 setup?" || { echo "Aborted."; exit 0; }
 
   _snap_pre "phase1 host setup start"
   step_packages
+  step_terminal_config
   step_sleep
   step_static_ip
   step_ssh
