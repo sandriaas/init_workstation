@@ -78,7 +78,7 @@ CF_DOMAIN_FILE="${USER_HOME}/.cloudflared/minipc-domain"
 cf_list_zones() {
   local token="${1:-}"
   [ -z "$token" ] && return 1
-  curl -sf -H "Authorization: Bearer $token" \
+  curl -sf --max-time 10 -H "Authorization: Bearer $token" \
     "https://api.cloudflare.com/client/v4/zones?per_page=50&status=active" \
     | grep -oP '"name"\s*:\s*"[^"]*"' | sed 's/"name"[[:space:]]*:[[:space:]]*"//;s/"//' 2>/dev/null
 }
@@ -219,7 +219,7 @@ cf_ensure_api_token() {
 cf_fetch_zone_id() {
   local token="$1" domain="$2"
   [ -z "$token" ] || [ -z "$domain" ] && return 1
-  curl -sf -H "Authorization: Bearer $token" \
+  curl -sf --max-time 10 -H "Authorization: Bearer $token" \
     "https://api.cloudflare.com/client/v4/zones?name=${domain}&status=active" \
     | grep -oP '"id"\s*:\s*"\K[^"]+' | head -1
 }
@@ -228,7 +228,7 @@ _cf_api_create_cname() {
   local token="$1" zone_id="$2" hostname="$3" target="$4"
   # Check if record already exists
   local existing
-  existing=$(curl -sf -H "Authorization: Bearer $token" \
+  existing=$(curl -sf --max-time 10 -H "Authorization: Bearer $token" \
     "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records?name=${hostname}&type=CNAME" 2>/dev/null)
 
   local record_id
@@ -243,7 +243,7 @@ _cf_api_create_cname() {
     fi
     # Update existing record to point to correct tunnel
     info "Updating CNAME: ${hostname} → ${target}"
-    curl -sf -X PUT \
+    curl -sf --max-time 10 -X PUT \
       -H "Authorization: Bearer $token" \
       -H "Content-Type: application/json" \
       --data "{\"type\":\"CNAME\",\"name\":\"${hostname}\",\"content\":\"${target}\",\"proxied\":true}" \
@@ -255,7 +255,7 @@ _cf_api_create_cname() {
 
   # Create new record
   info "Creating CNAME: ${hostname} → ${target}"
-  curl -sf -X POST \
+  curl -sf --max-time 10 -X POST \
     -H "Authorization: Bearer $token" \
     -H "Content-Type: application/json" \
     --data "{\"type\":\"CNAME\",\"name\":\"${hostname}\",\"content\":\"${target}\",\"proxied\":true}" \
