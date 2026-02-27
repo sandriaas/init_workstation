@@ -49,7 +49,7 @@ cf_store_api_token() {
 cf_list_zones() {
   local token="${1:-}"
   [ -z "$token" ] && return 1
-  curl -sf -H "Authorization: Bearer $token" \
+  curl -sf --max-time 10 -H "Authorization: Bearer $token" \
     "https://api.cloudflare.com/client/v4/zones?per_page=50&status=active" \
     | grep -oP '"name"\s*:\s*"[^"]*"' | sed 's/"name"[[:space:]]*:[[:space:]]*"//;s/"//' 2>/dev/null
 }
@@ -57,7 +57,7 @@ cf_list_zones() {
 cf_fetch_zone_id() {
   local token="$1" domain="$2"
   [ -z "$token" ] || [ -z "$domain" ] && return 1
-  curl -sf -H "Authorization: Bearer $token" \
+  curl -sf --max-time 10 -H "Authorization: Bearer $token" \
     "https://api.cloudflare.com/client/v4/zones?name=${domain}&status=active" \
     | grep -oP '"id"\s*:\s*"\K[^"]+' | head -1
 }
@@ -65,7 +65,7 @@ cf_fetch_zone_id() {
 _cf_api_create_cname() {
   local token="$1" zone_id="$2" hostname="$3" target="$4"
   local existing
-  existing=$(curl -sf -H "Authorization: Bearer $token" \
+  existing=$(curl -sf --max-time 10 -H "Authorization: Bearer $token" \
     "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records?name=${hostname}&type=CNAME" 2>/dev/null)
 
   local record_id
@@ -79,7 +79,7 @@ _cf_api_create_cname() {
       return 0
     fi
     info "Updating CNAME: ${hostname} -> ${target}"
-    curl -sf -X PUT \
+    curl -sf --max-time 10 -X PUT \
       -H "Authorization: Bearer $token" \
       -H "Content-Type: application/json" \
       --data "{\"type\":\"CNAME\",\"name\":\"${hostname}\",\"content\":\"${target}\",\"proxied\":true}" \
@@ -90,7 +90,7 @@ _cf_api_create_cname() {
   fi
 
   info "Creating CNAME: ${hostname} -> ${target}"
-  curl -sf -X POST \
+  curl -sf --max-time 10 -X POST \
     -H "Authorization: Bearer $token" \
     -H "Content-Type: application/json" \
     --data "{\"type\":\"CNAME\",\"name\":\"${hostname}\",\"content\":\"${target}\",\"proxied\":true}" \
@@ -254,7 +254,7 @@ fi
 ok "Ports to add: ${PORTS[*]}"
 
 # =============================================================================
-# Step 5: Subdomain naming
+# Step 5: Subdomain naming + routing mode
 # =============================================================================
 section "Subdomain Naming"
 
@@ -267,7 +267,17 @@ echo ""
 ask "Naming mode [1/2/3, default=1]: "; read -r _naming_mode
 _naming_mode="${_naming_mode:-1}"
 
+echo ""
+echo "  Choose routing mode:"
+echo "    1) Standard:  tunnel -> http://127.0.0.1:<port>  (normal services)"
+echo "    2) Portless:  tunnel -> http://127.0.0.1:<port> + Host: <name>.localhost:<port>"
+echo "                  Use this for apps that virtual-host on *.localhost (e.g. http://web.localhost:1355)"
+echo ""
+ask "Routing mode [1/2, default=1]: "; read -r _routing_mode
+_routing_mode="${_routing_mode:-1}"
+
 declare -A PORT_HOSTNAMES
+declare -A PORT_VHOSTS   # virtual host name per port (portless mode only)
 
 for port in "${PORTS[@]}"; do
   case "$_naming_mode" in
@@ -285,6 +295,14 @@ for port in "${PORTS[@]}"; do
       PORT_HOSTNAMES[$port]="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
       ;;
   esac
+
+  if [ "$_routing_mode" = "2" ]; then
+    _default_vhost="${port}-minipc"
+    ask "Virtual host name for port ${port} (will become <name>.localhost:${port}, default=${_default_vhost}): "
+    read -r _vhost
+    _vhost=$(echo "${_vhost:-$_default_vhost}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    PORT_VHOSTS[$port]="$_vhost"
+  fi
 done
 
 echo ""
@@ -293,7 +311,11 @@ echo ""
 printf "  %-45s  ->  %s\n" "HOSTNAME" "SERVICE"
 printf "  %-45s  ->  %s\n" "--------" "-------"
 for port in "${PORTS[@]}"; do
-  printf "  %-45s  ->  %s\n" "${PORT_HOSTNAMES[$port]}" "http://localhost:${port}"
+  if [ "$_routing_mode" = "2" ]; then
+    printf "  %-45s  ->  %s\n" "${PORT_HOSTNAMES[$port]}" "http://${PORT_VHOSTS[$port]}.localhost:${port} (via 127.0.0.1)"
+  else
+    printf "  %-45s  ->  %s\n" "${PORT_HOSTNAMES[$port]}" "http://localhost:${port}"
+  fi
 done
 echo ""
 ask "Proceed? [Y/n]: "; read -r _confirm
@@ -311,16 +333,20 @@ for port in "${PORTS[@]}"; do
   hostname="${PORT_HOSTNAMES[$port]}"
 
   # ── Add to tunnel config ──
-  if grep -q "localhost:${port}" "$CONFIG_FILE" 2>/dev/null; then
-    ok "Port ${port} already in config — skipping config update"
+  if grep -q "hostname: ${hostname}" "$CONFIG_FILE" 2>/dev/null; then
+    ok "Port ${port} (${hostname}) already in config — skipping config update"
   else
-    # Dev ports get httpHostHeader so Vite/bun accept the hostname
-    if [[ "$port" =~ ^(3000|3001|3002|4141|5173|5174|8080|8081|8082|8045)$ ]]; then
-      sed -i "/^  - service: http_status:404/i\\  - hostname: ${hostname}\\n    service: http://localhost:${port}\\n    originRequest:\\n      httpHostHeader: localhost:${port}" "$CONFIG_FILE"
+    if [ "$_routing_mode" = "2" ]; then
+      vhost="${PORT_VHOSTS[$port]}"
+      sed -i "/^  - service: http_status:404/i\\  - hostname: ${hostname}\\n    service: http://127.0.0.1:${port}\\n    originRequest:\\n      httpHostHeader: ${vhost}.localhost:${port}" "$CONFIG_FILE"
+      ok "Config: ${hostname} -> 127.0.0.1:${port} (Host: ${vhost}.localhost:${port})"
+    elif [[ "$port" =~ ^(3000|3001|3002|4141|5173|5174|8080|8081|8082|8045)$ ]]; then
+      sed -i "/^  - service: http_status:404/i\\  - hostname: ${hostname}\\n    service: http://127.0.0.1:${port}\\n    originRequest:\\n      httpHostHeader: localhost:${port}" "$CONFIG_FILE"
+      ok "Config: ${hostname} -> localhost:${port}"
     else
-      sed -i "/^  - service: http_status:404/i\\  - hostname: ${hostname}\\n    service: http://localhost:${port}" "$CONFIG_FILE"
+      sed -i "/^  - service: http_status:404/i\\  - hostname: ${hostname}\\n    service: http://127.0.0.1:${port}" "$CONFIG_FILE"
+      ok "Config: ${hostname} -> localhost:${port}"
     fi
-    ok "Config: ${hostname} -> localhost:${port}"
   fi
 
   # ── Create DNS CNAME ──
@@ -349,7 +375,11 @@ echo ""
 echo -e "${BOLD}${GREEN}Done. Ports added:${RESET}"
 echo ""
 for port in "${PORTS[@]}"; do
-  echo -e "  ${GREEN}https://${PORT_HOSTNAMES[$port]}${RESET}  ->  localhost:${port}"
+  if [ "$_routing_mode" = "2" ]; then
+    echo -e "  ${GREEN}https://${PORT_HOSTNAMES[$port]}${RESET}  ->  ${PORT_VHOSTS[$port]}.localhost:${port}"
+  else
+    echo -e "  ${GREEN}https://${PORT_HOSTNAMES[$port]}${RESET}  ->  localhost:${port}"
+  fi
 done
 echo ""
 echo "  Config: ${CONFIG_FILE}"
