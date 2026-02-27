@@ -315,7 +315,7 @@ for port in "${PORTS[@]}"; do
     ok "Port ${port} already in config — skipping config update"
   else
     # Dev ports get httpHostHeader so Vite/bun accept the hostname
-    if [[ "$port" =~ ^(3000|3001|3002|4141|5173|5174|8080|8081|8082)$ ]]; then
+    if [[ "$port" =~ ^(3000|3001|3002|4141|5173|5174|8080|8081|8082|8045)$ ]]; then
       sed -i "/^  - service: http_status:404/i\\  - hostname: ${hostname}\\n    service: http://localhost:${port}\\n    originRequest:\\n      httpHostHeader: localhost:${port}" "$CONFIG_FILE"
     else
       sed -i "/^  - service: http_status:404/i\\  - hostname: ${hostname}\\n    service: http://localhost:${port}" "$CONFIG_FILE"

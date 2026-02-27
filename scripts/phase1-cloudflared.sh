@@ -52,6 +52,7 @@ LOCAL_SERVICES=(
   "4141:dev-4141"
   "5174:dev-5174"
   "8082:dev-8082"
+  "8045:dev-8045"
 )
 # Dev port labels (prefix "dev-") get httpHostHeader overridden to localhost:<port>
 # so Vite/bun dev servers don't reject the tunnel hostname via allowedHosts check.
