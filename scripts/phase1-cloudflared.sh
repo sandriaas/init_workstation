@@ -13,6 +13,8 @@
 #   4141  -> Bun dev
 #   5174  -> Bun dev (Vite)
 #   8082  -> Dev
+#   8045  -> Dev
+#   1355  -> ERP/POS/Attendance/Web (erp.localhost:1355, pos.localhost:1355, ...)
 #
 # Usage:
 #   sudo bash scripts/phase1-cloudflared.sh            # full setup
@@ -53,6 +55,10 @@ LOCAL_SERVICES=(
   "5174:dev-5174"
   "8082:dev-8082"
   "8045:dev-8045"
+  "1355:dev-erp"
+  "1355:dev-pos"
+  "1355:dev-attendance"
+  "1355:dev-web"
 )
 # Dev port labels (prefix "dev-") get httpHostHeader overridden to localhost:<port>
 # so Vite/bun dev servers don't reject the tunnel hostname via allowedHosts check.
@@ -280,8 +286,16 @@ setup_local_tunnel() {
   printf "  %-35s → %s\n" "HOSTNAME" "SERVICE"
   echo "  ─────────────────────────────────────────────────────"
   for svc in "${LOCAL_SERVICES[@]}"; do
-    local port="${svc%%:*}" label="${svc#*:}"
-    printf "  %-35s → %s\n" "${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}" "http://localhost:${port} (${label})"
+    local port="${svc%%:*}"
+    local label="${svc#*:}"
+    local prefix_name="${port}"
+    local target_host="localhost"
+    if [ "$port" = "1355" ]; then
+      prefix_name="${label#dev-}"
+      target_host="${prefix_name}.localhost"
+    fi
+    local hostname="${prefix_name}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
+    printf "  %-35s → %s\n" "${hostname}" "http://${target_host}:${port} (${label})"
   done
   echo ""
   info "Dev-port tunnels (3000–5174) will show a connection error when no server is running — that's normal."
@@ -329,13 +343,20 @@ setup_local_tunnel() {
     for svc in "${LOCAL_SERVICES[@]}"; do
       local port="${svc%%:*}"
       local label="${svc#*:}"
-      local hostname="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
+      local prefix_name="${port}"
+      local target_host="localhost"
+      if [ "$port" = "1355" ]; then
+        prefix_name="${label#dev-}"
+        target_host="${prefix_name}.localhost"
+      fi
+
+      local hostname="${prefix_name}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
       echo "  - hostname: ${hostname}"
-      echo "    service: http://localhost:${port}"
+      echo "    service: http://${target_host}:${port}"
       # Dev ports: override Host header to localhost so Vite allowedHosts check passes
       if [[ "$label" == dev-* ]]; then
         echo "    originRequest:"
-        echo "      httpHostHeader: localhost:${port}"
+        echo "      httpHostHeader: ${target_host}:${port}"
       fi
     done
     echo "  - service: http_status:404"
@@ -356,7 +377,10 @@ setup_local_tunnel() {
   if [ -n "$_zone_id" ] && [ -n "$_api_token" ]; then
     for svc in "${LOCAL_SERVICES[@]}"; do
       local port="${svc%%:*}"
-      local hostname="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
+      local label="${svc#*:}"
+      local prefix_name="${port}"
+      [ "$port" = "1355" ] && prefix_name="${label#dev-}"
+      local hostname="${prefix_name}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
       _cf_api_create_cname "$_api_token" "$_zone_id" "$hostname" "$TUNNEL_TARGET" || true
     done
   else
@@ -364,7 +388,10 @@ setup_local_tunnel() {
     warn "(This won't work if a wildcard *.${CF_DOMAIN} exists)"
     for svc in "${LOCAL_SERVICES[@]}"; do
       local port="${svc%%:*}"
-      local hostname="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
+      local label="${svc#*:}"
+      local prefix_name="${port}"
+      [ "$port" = "1355" ] && prefix_name="${label#dev-}"
+      local hostname="${prefix_name}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
       sudo -u "$CURRENT_USER" cloudflared tunnel route dns "${TUNNEL_NAME}" "${hostname}" 2>/dev/null \
         && ok "CNAME: ${hostname}" \
         || warn "Route DNS failed for ${hostname} — may already exist"
@@ -458,8 +485,15 @@ cmd_add_port() {
   local HOSTNAME_PREFIX
   HOSTNAME_PREFIX=$(grep 'hostname:' "$CONFIG_FILE" | grep -oP '\d+-\K[^.]+' | head -1 || echo "$HOSTNAME_PREFIX_DEFAULT")
 
-  local hostname="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
-  info "Adding: ${hostname} → http://localhost:${port}"
+  local prefix_name="${port}"
+  local target_host="localhost"
+  if [ "$port" = "1355" ]; then
+    prefix_name="${label#dev-}"
+    target_host="${prefix_name}.localhost"
+  fi
+
+  local hostname="${prefix_name}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
+  info "Adding: ${hostname} → http://${target_host}:${port}"
 
   # Get tunnel ID
   local TUNNEL_ID
@@ -470,12 +504,11 @@ cmd_add_port() {
     exit 1
   fi
 
-  # Check if already in config
-  if grep -q "localhost:${port}" "$CONFIG_FILE" 2>/dev/null; then
-    ok "Port ${port} already in config — skipping."
+  # Check if already in config (match by hostname, not port, to allow multiple 1355 entries)
+  if grep -q "hostname: ${hostname}" "$CONFIG_FILE" 2>/dev/null; then
+    ok "Port ${port} (${hostname}) already in config — skipping."
   else
-    # Insert new ingress rule before the final catch-all
-    sed -i "/^  - service: http_status:404/i\\  - hostname: ${hostname}\\n    service: http://localhost:${port}" "$CONFIG_FILE"
+    sed -i "/^  - service: http_status:404/i\\  - hostname: ${hostname}\\n    service: http://${target_host}:${port}" "$CONFIG_FILE"
     ok "Added to config: ${hostname}"
   fi
 
@@ -514,8 +547,16 @@ print_summary() {
   echo ""
   echo -e "  ${BOLD}URLs:${RESET}"
   for svc in "${LOCAL_SERVICES[@]}"; do
-    local port="${svc%%:*}" label="${svc#*:}"
-    echo -e "    ${GREEN}https://${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}${RESET}  → localhost:${port} (${label})"
+    local port="${svc%%:*}"
+    local label="${svc#*:}"
+    local prefix_name="${port}"
+    local target_host="localhost"
+    if [ "$port" = "1355" ]; then
+      prefix_name="${label#dev-}"
+      target_host="${prefix_name}.localhost"
+    fi
+    local hostname="${prefix_name}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
+    echo -e "    ${GREEN}https://${hostname}${RESET}  → ${target_host}:${port} (${label})"
   done
   echo ""
   echo -e "  ${BOLD}Config:${RESET}   ${USER_HOME}/.cloudflared/config-${TUNNEL_NAME}.yml"
