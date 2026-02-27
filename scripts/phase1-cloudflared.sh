@@ -352,8 +352,8 @@ setup_local_tunnel() {
 
       local hostname="${prefix_name}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
       echo "  - hostname: ${hostname}"
-      echo "    service: http://${target_host}:${port}"
-      # Dev ports: override Host header to localhost so Vite allowedHosts check passes
+      echo "    service: http://127.0.0.1:${port}"
+      # Dev ports: override Host header so the app sees the correct virtual host
       if [[ "$label" == dev-* ]]; then
         echo "    originRequest:"
         echo "      httpHostHeader: ${target_host}:${port}"
