@@ -5,12 +5,14 @@
 # Idempotent: safely re-run; already-done steps are skipped
 # =============================================================================
 # Services (default):
-#   9090  → Cockpit
-#   19999 → Netdata
-#   3000  → Bun dev
-#   3001  → Bun dev
-#   3002  → Bun dev
-#   5174  → Bun dev (Vite)
+#   9090  -> Cockpit
+#   19999 -> Netdata
+#   3000  -> Bun dev
+#   3001  -> Bun dev
+#   3002  -> Bun dev
+#   4141  -> Bun dev
+#   5174  -> Bun dev (Vite)
+#   8082  -> Dev
 #
 # Usage:
 #   sudo bash scripts/phase1-cloudflared.sh            # full setup
@@ -49,6 +51,7 @@ LOCAL_SERVICES=(
   "3002:dev-3002"
   "4141:dev-4141"
   "5174:dev-5174"
+  "8082:dev-8082"
 )
 # Dev port labels (prefix "dev-") get httpHostHeader overridden to localhost:<port>
 # so Vite/bun dev servers don't reject the tunnel hostname via allowedHosts check.
@@ -450,9 +453,9 @@ cmd_add_port() {
     exit 1
   fi
 
-  # Detect prefix from existing config
+  # Detect prefix from existing config (only look at hostname: lines, not tunnel UUID)
   local HOSTNAME_PREFIX
-  HOSTNAME_PREFIX=$(grep -oP '\d+-\K[^.]+' "$CONFIG_FILE" | head -1 || echo "$HOSTNAME_PREFIX_DEFAULT")
+  HOSTNAME_PREFIX=$(grep 'hostname:' "$CONFIG_FILE" | grep -oP '\d+-\K[^.]+' | head -1 || echo "$HOSTNAME_PREFIX_DEFAULT")
 
   local hostname="${port}-${HOSTNAME_PREFIX}.${CF_DOMAIN}"
   info "Adding: ${hostname} → http://localhost:${port}"
@@ -519,6 +522,7 @@ print_summary() {
   echo ""
   echo -e "  ${BOLD}Add more ports later:${RESET}"
   echo "    sudo bash scripts/phase1-cloudflared.sh add-port 8080"
+  echo "    sudo bash scripts/cloudflared-addport.sh          # interactive, multi-port"
   echo ""
 }
 
