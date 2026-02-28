@@ -48,9 +48,9 @@ USER_HOME="$HOME"
 TS="$(date +%Y%m%d-%H%M%S)"
 ARCHIVE_NAME="minipc-backup-${TS}.tar.gz"
 ARCHIVE_PATH="${USER_HOME}/${ARCHIVE_NAME}"
-STAGE_DIR="$(mktemp -d /tmp/minipc-backup-XXXXXX)"
+STAGE_DIR="$(mktemp -d "${USER_HOME}/.minipc-backup-stage-XXXXXX")"
 
-cleanup() { rm -rf "$STAGE_DIR"; }
+cleanup() { sudo rm -rf "$STAGE_DIR"; }
 trap cleanup EXIT
 
 # ─── Banner ──────────────────────────────────────────────────────────────────
@@ -184,7 +184,14 @@ du -sh "${USER_HOME}/_apps" 2>/dev/null || warn "  ~/_apps not found."
 if confirm "Back up ~/_apps/?"; then
   src="${USER_HOME}/_apps"
   if [ -d "$src" ]; then
-    stage_copy "$src" "home"
+    dest="${STAGE_DIR}/home/_apps"
+    mkdir -p "$dest"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --info=progress2 "${src}/" "${dest}/"
+    else
+      info "  (rsync not found — plain copy)"
+      cp -a "${src}/." "${dest}/"
+    fi
     ok "_apps staged."
   else
     warn "~/_apps not found — skipping."
