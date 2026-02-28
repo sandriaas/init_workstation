@@ -187,7 +187,7 @@ if confirm "Back up ~/_apps/?"; then
     dest="${STAGE_DIR}/home/_apps"
     mkdir -p "$dest"
     if command -v rsync >/dev/null 2>&1; then
-      rsync -a --info=progress2 "${src}/" "${dest}/"
+      rsync -a --info=progress2 "${src}/" "${dest}/" || { rc=$?; [ $rc -eq 24 ] && warn "  Some files vanished during transfer (browser cache) — ignored." || exit $rc; }
     else
       info "  (rsync not found — plain copy)"
       cp -a "${src}/." "${dest}/"
