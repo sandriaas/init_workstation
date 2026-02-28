@@ -79,6 +79,24 @@ echo
 warn "Answer Y/N for each section. Default is Y (press Enter to accept)."
 echo
 
+# ─── Helper: copy a single file with progress ────────────────────────────────
+copy_with_progress() {
+  # copy_with_progress <src> <dest_dir>  (dest_dir must exist)
+  local src="$1" dest_dir="$2"
+  local fname size_bytes
+  fname="$(basename "$src")"
+  size_bytes="$(stat -c%s "$src" 2>/dev/null || echo 0)"
+
+  if command -v pv >/dev/null 2>&1; then
+    pv -N "$fname" -s "$size_bytes" "$src" > "${dest_dir}/${fname}"
+  elif command -v rsync >/dev/null 2>&1; then
+    rsync --progress --no-inc-recursive "$src" "${dest_dir}/"
+  else
+    info "  (pv/rsync not found — plain copy)"
+    cp "$src" "${dest_dir}/"
+  fi
+}
+
 # ─── Helper: restore with ownership fix ──────────────────────────────────────
 restore_to_home() {
   # restore_to_home <src_subpath_in_archive> <dest_relative_to_home>
@@ -329,8 +347,7 @@ if confirm "Restore VM disk images to ${LIBVIRT_DIR}?"; then
   if [ -d "$VM_IMG_SRC" ]; then
     mkdir -p "$LIBVIRT_DIR"
     find "$VM_IMG_SRC" -maxdepth 1 -type f | while read -r img; do
-      info "  Copying $(basename "$img") ..."
-      cp "$img" "${LIBVIRT_DIR}/"
+      copy_with_progress "$img" "$LIBVIRT_DIR"
     done
     chown -R libvirt-qemu:kvm "${LIBVIRT_DIR}" 2>/dev/null \
       || chown -R qemu:qemu "${LIBVIRT_DIR}" 2>/dev/null \

@@ -66,6 +66,24 @@ echo
 warn "Answer Y/N for each section. Default is Y (press Enter to accept)."
 echo
 
+# ─── Helper: copy a single file with progress ────────────────────────────────
+copy_with_progress() {
+  # copy_with_progress <src> <dest_dir>  (dest_dir must exist)
+  local src="$1" dest_dir="$2"
+  local fname size_bytes
+  fname="$(basename "$src")"
+  size_bytes="$(sudo stat -c%s "$src" 2>/dev/null || stat -c%s "$src" 2>/dev/null || echo 0)"
+
+  if command -v pv >/dev/null 2>&1; then
+    sudo pv -N "$fname" -s "$size_bytes" "$src" > "${dest_dir}/${fname}"
+  elif command -v rsync >/dev/null 2>&1; then
+    sudo rsync --progress --no-inc-recursive "$src" "${dest_dir}/"
+  else
+    info "  (pv/rsync not found — plain copy)"
+    sudo cp "$src" "${dest_dir}/"
+  fi
+}
+
 # ─── Helper: copy with parent-dir preservation ───────────────────────────────
 stage_copy() {
   # stage_copy <src_path> <dest_subdir_in_stage>
@@ -297,8 +315,7 @@ fi
 if confirm "Back up VM disk images (*.qcow2 + *-seed.iso)?"; then
   if [ -n "$QCOW2_FILES" ]; then
     echo "$QCOW2_FILES" | while read -r f; do
-      info "  Copying $(basename "$f") ..."
-      sudo cp "$f" "${VM_STAGE}/images/"
+      copy_with_progress "$f" "${VM_STAGE}/images"
     done
     sudo chown -R "${CURRENT_USER}:${CURRENT_USER}" "${VM_STAGE}/images/"
     ok "VM images staged."
