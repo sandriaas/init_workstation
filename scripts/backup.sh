@@ -352,8 +352,16 @@ STAGE_SIZE="$(du -sb "$STAGE_DIR" 2>/dev/null | cut -f1 || echo 0)"
 PV_CMD="cat"; command -v pv >/dev/null 2>&1 && PV_CMD="pv -s ${STAGE_SIZE}"
 
 if ! command -v pigz >/dev/null 2>&1; then
-  info "pigz not found — installing now (sudo pacman -S --noconfirm pigz) ..."
-  sudo pacman -S --noconfirm pigz
+  info "pigz not found — installing now ..."
+  if command -v pacman >/dev/null 2>&1; then
+    sudo pacman -S --noconfirm pigz
+  elif command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y pigz
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y pigz
+  else
+    err "Cannot auto-install pigz — install it manually and re-run."; exit 1
+  fi
 fi
 info "Creating ${ARCHIVE_PATH} (pigz parallel compression) ..."
 tar -c -C "$STAGE_DIR" . | $PV_CMD | pigz > "$ARCHIVE_PATH"
