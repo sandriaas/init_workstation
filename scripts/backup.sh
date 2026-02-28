@@ -351,18 +351,12 @@ section "Compressing archive"
 STAGE_SIZE="$(du -sb "$STAGE_DIR" 2>/dev/null | cut -f1 || echo 0)"
 PV_CMD="cat"; command -v pv >/dev/null 2>&1 && PV_CMD="pv -s ${STAGE_SIZE}"
 
-if command -v pigz >/dev/null 2>&1; then
-  info "Creating ${ARCHIVE_PATH} (pigz parallel compression) ..."
-  tar -c -C "$STAGE_DIR" . | $PV_CMD | pigz > "$ARCHIVE_PATH"
-else
-  # qcow2 files are already compressed — gzip single-threaded is painfully slow
-  # and gains almost nothing. Store uncompressed, rename to .tar.
-  ARCHIVE_PATH="${ARCHIVE_PATH%.tar.gz}.tar"
-  info "pigz not found — storing uncompressed (qcow2 doesn't compress meaningfully)."
-  info "Creating ${ARCHIVE_PATH} ..."
-  tar -c -C "$STAGE_DIR" . | $PV_CMD > "$ARCHIVE_PATH"
-  info "Install pigz for parallel-compressed archives:  sudo pacman -S pigz"
+if ! command -v pigz >/dev/null 2>&1; then
+  info "pigz not found — installing now (sudo pacman -S --noconfirm pigz) ..."
+  sudo pacman -S --noconfirm pigz
 fi
+info "Creating ${ARCHIVE_PATH} (pigz parallel compression) ..."
+tar -c -C "$STAGE_DIR" . | $PV_CMD | pigz > "$ARCHIVE_PATH"
 chmod 600 "$ARCHIVE_PATH"
 
 ARCHIVE_SIZE="$(du -sh "$ARCHIVE_PATH" | cut -f1)"
