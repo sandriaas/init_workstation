@@ -71,6 +71,12 @@ sudo bash scripts/dokploy-cloudflared.sh
 # Add a DNS record for a new Dokploy app
 sudo bash scripts/dokploy-cloudflared.sh add-domain myapp
 
+# Guardrail: start VM automatically if it is found shut off
+bash scripts/vm-guard.sh
+
+# Optional auto-heal loop (cron, every minute)
+# * * * * * cd /path/to/init_workstation && bash scripts/vm-guard.sh >/dev/null 2>&1
+
 # Verify the entire setup (read-only)
 bash scripts/check.sh
 ```
@@ -155,6 +161,7 @@ check.sh  (read-only verification)
 | `phase3-client.ps1` | Windows | SSH client for VM (Scoop + websocat + SSH config + test) |
 | `cockpit-cloudflared.sh` | Host | Standalone CF tunnel for Cockpit (:9090) + SSH (:22) |
 | `dokploy-cloudflared.sh` | Host → VM | Install Dokploy + CF tunnel + DNS auto-sync watcher |
+| `vm-guard.sh` | Host | Guardrail: starts target VM when found shut off (cron/systemd timer friendly) |
 | `check.sh` | Host | Read-only system verification (all phases) |
 
 ---
