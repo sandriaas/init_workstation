@@ -14,6 +14,17 @@ warn()    { echo -e "${YELLOW}[WARN]${RESET} $*"; }
 ask()     { echo -e "${YELLOW}[?]${RESET} $*"; }
 confirm() { ask "$1 [Y/n]: "; read -r r; [[ "${r:-Y}" =~ ^[Yy]$ ]]; }
 
+get_linux_websocat_asset() {
+  case "$(uname -m)" in
+    x86_64) echo "websocat.x86_64-unknown-linux-musl" ;;
+    aarch64|arm64) echo "websocat.aarch64-unknown-linux-musl" ;;
+    *)
+      warn "Unsupported Linux architecture for automatic websocat install: $(uname -m)"
+      return 1
+      ;;
+  esac
+}
+
 # ─── Detect environment ───────────────────────────────────────────────────────
 detect_env() {
   if [ -d /data/data/com.termux ]; then
@@ -40,14 +51,14 @@ install_websocat() {
   info "Installing websocat..."
   case $ENV in
     arch)    sudo pacman -S --noconfirm --needed websocat ;;
-    ubuntu)  sudo curl -sL https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl \
-               -o /usr/local/bin/websocat && sudo chmod +x /usr/local/bin/websocat ;;
-    fedora)  sudo curl -sL https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl \
-               -o /usr/local/bin/websocat && sudo chmod +x /usr/local/bin/websocat ;;
+    ubuntu|fedora|generic)
+      local asset
+      asset="$(get_linux_websocat_asset)" || return 1
+      sudo curl -sL "https://github.com/vi/websocat/releases/latest/download/${asset}" \
+        -o /usr/local/bin/websocat && sudo chmod +x /usr/local/bin/websocat
+      ;;
     macos)   brew install websocat ;;
     termux)  pkg install -y websocat ;;
-    generic) sudo curl -sL https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl \
-               -o /usr/local/bin/websocat && sudo chmod +x /usr/local/bin/websocat ;;
   esac
   ok "websocat installed"
 }
@@ -80,8 +91,8 @@ setup_ssh_config() {
 
   cat >> "$SSH_CONFIG" << SSHEOF
 
-# MiniPC via Cloudflare Tunnel
-Host minipc
+# it01 host via Cloudflare Tunnel
+Host it01
   HostName ${TUNNEL_HOST}
   ProxyCommand websocat -E --binary - wss://%h
   User ${SERVER_USER}
@@ -111,7 +122,7 @@ main() {
   echo -e "${BOLD}╔══════════════════════════════════════╗${RESET}"
   echo -e "${BOLD}║   Done! Connect with:                ║${RESET}"
   echo -e "${BOLD}║                                      ║${RESET}"
-  echo -e "${BOLD}║   ${GREEN}ssh minipc${RESET}${BOLD}                         ║${RESET}"
+  echo -e "${BOLD}║   ${GREEN}ssh it01${RESET}${BOLD}                           ║${RESET}"
   echo -e "${BOLD}╚══════════════════════════════════════╝${RESET}"
   echo ""
 }

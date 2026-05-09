@@ -34,6 +34,101 @@ pass() { ok "$*";  PASS=$((PASS+1)); }
 flag() { warn "$*"; WARN=$((WARN+1)); }
 bad()  { fail "$*"; FAIL=$((FAIL+1)); }
 
+PROFILE="full"
+if [ "${1:-}" = "--profile" ]; then
+  PROFILE="${2:-full}"
+  shift 2
+fi
+
+find_cloudflared_config() {
+  local candidate
+  for candidate in "${HOME}/.cloudflared/config.yml" "/etc/cloudflared/config.yml"; do
+    [ -f "$candidate" ] && { echo "$candidate"; return 0; }
+  done
+  return 1
+}
+
+find_it01_hostname_file() {
+  local candidate
+  for candidate in "/etc/cloudflared/it01-hostname" "${HOME}/.cloudflared/it01-hostname"; do
+    [ -r "$candidate" ] && { echo "$candidate"; return 0; }
+  done
+  return 1
+}
+
+run_host_ssh_profile() {
+  local tunnel_host="" hostname_file="" resolved_hosts="" ssh_state="" ssh_enabled=""
+
+  section "Host SSH Profile"
+
+  ssh_state="$(systemctl is-active sshd 2>/dev/null || systemctl is-active ssh 2>/dev/null || true)"
+  ssh_enabled="$(systemctl is-enabled sshd 2>/dev/null || systemctl is-enabled ssh 2>/dev/null || true)"
+  [ "${ssh_state}" = "active" ] && pass "sshd active" || bad "sshd not running"
+  [ "${ssh_enabled}" = "enabled" ] && pass "sshd enabled on boot" || flag "sshd not enabled on boot"
+
+  if systemctl is-active it01-cloudflared.service >/dev/null 2>&1; then
+    pass "it01-cloudflared.service active"
+  else
+    bad "it01-cloudflared.service not running"
+  fi
+  if systemctl is-enabled it01-cloudflared.service >/dev/null 2>&1; then
+    pass "it01-cloudflared.service enabled on boot"
+  else
+    flag "it01-cloudflared.service not enabled on boot"
+  fi
+
+  if [ -f /etc/cloudflared/it01.env ]; then
+    pass "Tunnel token env present: /etc/cloudflared/it01.env"
+  else
+    bad "Tunnel token env missing: /etc/cloudflared/it01.env"
+  fi
+
+  hostname_file="$(find_it01_hostname_file || true)"
+  if [ -n "${hostname_file}" ]; then
+    pass "Hostname file present: ${hostname_file}"
+    tunnel_host="$(cat "${hostname_file}" 2>/dev/null || true)"
+  else
+    bad "Hostname file missing for it01 host tunnel"
+  fi
+
+  if [ -n "${tunnel_host}" ]; then
+    pass "Host SSH alias: it01 -> ${tunnel_host}"
+    resolved_hosts="$(getent ahosts "${tunnel_host}" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd ', ' -)"
+    if [ -n "${resolved_hosts}" ]; then
+      pass "DNS resolves: ${tunnel_host} -> ${resolved_hosts}"
+    else
+      bad "DNS not propagated for ${tunnel_host}"
+    fi
+
+    if command -v websocat >/dev/null 2>&1; then
+      if timeout 10 websocat -E --binary - "wss://${tunnel_host}" </dev/null >/dev/null 2>&1; then
+        pass "websocat handshake succeeded for ${tunnel_host}"
+      else
+        bad "websocat handshake failed for ${tunnel_host}"
+      fi
+    else
+      flag "websocat not installed locally — skipping tunnel handshake"
+    fi
+  else
+    bad "Host SSH tunnel hostname not configured"
+  fi
+
+  section "Summary"
+  echo -e "  ${GREEN}✓ ${PASS} passed${RESET}   ${YELLOW}! ${WARN} warnings${RESET}   ${RED}✗ ${FAIL} failed${RESET}"
+  [ "${FAIL}" -eq 0 ] || echo -e "\n  ${RED}Action required — review ✗ items above.${RESET}"
+  exit "${FAIL}"
+}
+
+[ "${PROFILE}" = "host-ssh" ] && run_host_ssh_profile
+
+extract_ssh_tunnel_host() {
+  local cfg="$1"
+  awk '
+    $1 == "-" && $2 == "hostname:" { host=$3 }
+    $1 == "service:" && $2 ~ /^ssh:\/\// { print host; exit }
+  ' "$cfg" 2>/dev/null
+}
+
 # ─── System Info ─────────────────────────────────────────────────────────────
 section "System Information"
 CPU="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo unknown)"
@@ -117,10 +212,17 @@ else
   flag "sshd not enabled — won't start on reboot"
 fi
 
+TUNNEL_CFG="$(find_cloudflared_config || true)"
+TUNNEL_HOST=""
+[ -n "${TUNNEL_CFG:-}" ] && TUNNEL_HOST="$(extract_ssh_tunnel_host "$TUNNEL_CFG" || true)"
+
 # cloudflared
 if systemctl is-active cloudflared >/dev/null 2>&1; then
-  TUNNEL_HOST="$(awk '/hostname:/{print $NF; exit}' ~/.cloudflared/config.yml 2>/dev/null || echo unknown)"
-  pass "cloudflared active — tunnel: ${TUNNEL_HOST}"
+  if [ -n "${TUNNEL_HOST:-}" ]; then
+    pass "cloudflared active — SSH tunnel: ${TUNNEL_HOST}"
+  else
+    bad  "cloudflared active but SSH tunnel hostname missing from config"
+  fi
 else
   bad  "cloudflared not running"
 fi
@@ -128,6 +230,35 @@ if systemctl is-enabled cloudflared >/dev/null 2>&1; then
   pass "cloudflared enabled (auto-starts after reboot)"
 else
   flag "cloudflared not enabled on boot"
+fi
+
+section "Host Tunnel"
+if [ -n "${TUNNEL_CFG:-}" ]; then
+  pass "cloudflared config present: ${TUNNEL_CFG}"
+else
+  bad "cloudflared config not found in ~/.cloudflared/config.yml or /etc/cloudflared/config.yml"
+fi
+
+if [ -n "${TUNNEL_HOST:-}" ]; then
+  pass "Host SSH alias: it01 → ${TUNNEL_HOST}"
+  CNAME_TARGET="$(dig +short CNAME "${TUNNEL_HOST}" 2>/dev/null | head -1 | sed 's/\.$//')"
+  if [ -n "${CNAME_TARGET:-}" ]; then
+    pass "DNS CNAME resolves: ${TUNNEL_HOST} → ${CNAME_TARGET}"
+  else
+    bad "DNS CNAME missing or not propagated for ${TUNNEL_HOST}"
+  fi
+
+  if command -v websocat >/dev/null 2>&1; then
+    if timeout 10 websocat -E --binary - "wss://${TUNNEL_HOST}" </dev/null >/dev/null 2>&1; then
+      pass "websocat handshake succeeded for ${TUNNEL_HOST}"
+    else
+      bad "websocat handshake failed for ${TUNNEL_HOST}"
+    fi
+  else
+    flag "websocat not installed locally — skipping tunnel handshake"
+  fi
+else
+  bad "Host SSH tunnel hostname not configured"
 fi
 
 # docker

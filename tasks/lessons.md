@@ -1,0 +1,2 @@
+- Long SSH bootstrap one-liners are brittle on phone terminals because wrapped lines can split paths and config content.
+- Prefer a checked-in file with short multiline commands or helper scripts for mobile copy-paste flows.

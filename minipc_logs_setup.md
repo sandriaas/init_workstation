@@ -131,7 +131,7 @@ curl -sL https://raw.githubusercontent.com/.../phase1-client.sh | bash
 
 The script asks for your tunnel hostname and server username, then ends with:
 ```
-ssh minipc
+ssh it01
 ```
 
 ### Manual (if you prefer)
@@ -150,7 +150,7 @@ Install websocat:
 `~/.ssh/config`:
 
 ```
-Host minipc
+Host it01
   HostName b8sqa0n0v48o.easyrentbali.com
   ProxyCommand websocat -E --binary - wss://%h
   User sandriaas
@@ -183,7 +183,7 @@ Copies saved in `configs/` for reference and restore.
 | IOMMU in Limine cmdline | ✅ Set (active after reboot) |
 | Static IP | ✅ Configured |
 | BTRFS snapshot | ✅ `/snapshots/pre-phase1-20260219-134445` |
-| Cloudflare tunnel `minipc-ssh` | ✅ Live |
+| Cloudflare tunnel `it01-ssh` | ✅ Live |
 | DNS `b8sqa0n0v48o.easyrentbali.com` | ✅ CNAME → tunnel |
 | Terminal SSH via websocat | ✅ Working |
 

@@ -165,7 +165,7 @@ COCKPIT_HOST=""
 
 setup_tunnel() {
   step "Step 4: CF tunnel"
-  TUNNEL_NAME="minipc-ssh"
+  TUNNEL_NAME="it01-ssh"
 
   # Show existing tunnels
   echo ""
@@ -326,7 +326,7 @@ print_summary() {
   echo ""
   echo -e "${BOLD}  ┌─ SSH Access ───────────────────────────────────────────────${RESET}"
   printf "  │  %-18s %s\n" "LAN:"        "ssh ${CURRENT_USER}@${host_ip}"
-  printf "  │  %-18s %s\n" "Via tunnel:" "ssh ${CURRENT_USER}@${TUNNEL_HOST}"
+  printf "  │  %-18s %s\n" "Via tunnel:" "ssh it01"
 
   echo ""
   echo -e "${BOLD}  ├─ Cockpit Web UI ──────────────────────────────────────────${RESET}"

@@ -111,7 +111,7 @@ phase1.sh ───────────────────────�
 cockpit-cloudflared.sh ─────────────────────────── standalone
   └─ install cloudflared on host
      auth (browser / API token, reuses saved creds)
-     create/reuse tunnel "minipc-ssh"
+     create/reuse tunnel "it01-ssh"
      route DNS: ssh.domain → :22, cockpit.domain → :9090
      wrong-tunnel CNAME detection + auto-fix
      install systemd service
@@ -130,7 +130,7 @@ dokploy-cloudflared.sh ───────────────────
 
 phase1-client.sh / phase1-client.ps1  (host SSH)
   └─ install websocat + openssh
-     write ~/.ssh/config → ssh minipc
+     write ~/.ssh/config → ssh it01
 
 phase2-client.sh  (VM SSH — legacy alias)
   └─ install websocat + openssh
@@ -369,7 +369,7 @@ Internet / Phone / Laptop
 │  Host Machine  192.168.110.90           │  ← Physical LAN (your router)
 │  CachyOS / Arch                         │
 │                                         │
-│  cloudflared ──► minipc-ssh             │  ← Host tunnel (phase1 / cockpit-cloudflared)
+│  cloudflared ──► it01-ssh               │  ← Host tunnel (phase1 / cockpit-cloudflared)
 │    ssh.easyrentbali.com     → :22       │
 │    cockpit.easyrentbali.com → :9090     │
 │                                         │
@@ -423,6 +423,33 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/m
 
 ## SSH from Phone / Other Devices
 
+### Recommended For This Machine
+
+Use the dedicated host-only flow for this machine instead of the broader workstation/VM bootstrap.
+
+#### Server setup on this machine
+
+```bash
+sudo CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... bash scripts/it01-host.sh
+```
+
+This prints the dedicated random public hostname for this machine and prepares the local alias `it01`.
+
+#### Client setup on Termux / Linux / macOS
+
+```bash
+bash scripts/it01-client.sh --host <generated-hostname>
+ssh it01
+```
+
+Copy-paste commands for Termux and another computer are in [it01-connect.md](/home/it01/_project/minipc/it01-connect.md:1).
+
+#### Host-only verification
+
+```bash
+bash scripts/check.sh --profile host-ssh
+```
+
 ### Host SSH — `phase1-client.sh`
 
 Run on any device to SSH into the **host machine** via Cloudflare tunnel.
@@ -442,7 +469,23 @@ irm "https://api.github.com/repos/sandriaas/init_workstation/contents/scripts/ph
 
 > Installs Scoop, winget, websocat, and OpenSSH client automatically.
 
-Then: `ssh minipc`
+Then: `ssh it01`
+
+#### Termux quick path
+
+```bash
+pkg update
+pkg install -y openssh websocat
+bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)
+ssh it01
+```
+
+#### Another Linux/macOS machine
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)
+ssh it01
+```
 
 ### VM SSH — `phase3-client.sh`
 
@@ -475,7 +518,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/m
 
 ```
 # Host machine
-Host minipc
+Host it01
   HostName b8sqa0n0v48o.easyrentbali.com
   ProxyCommand websocat -E --binary - wss://%h
   User sandriaas
@@ -485,6 +528,12 @@ Host server-vm
   HostName vm-subdomain.easyrentbali.com
   ProxyCommand websocat -E --binary - wss://%h
   User sandriaas
+```
+
+One-shot manual connect without editing `~/.ssh/config`:
+
+```bash
+ssh -o ProxyCommand='websocat -E --binary - wss://%h' sandriaas@b8sqa0n0v48o.easyrentbali.com
 ```
 
 ---
@@ -502,7 +551,7 @@ sudo bash scripts/cockpit-cloudflared.sh
 1. Installs cloudflared on host (pacman/apt/dnf)
 2. Authenticates with Cloudflare (browser login or API token — reuses saved credentials)
 3. Lists domains from your CF account → select one
-4. Creates/reuses tunnel `minipc-ssh`
+4. Creates/reuses tunnel `it01-ssh`
 5. Configures ingress: `ssh.domain → localhost:22`, `cockpit.domain → localhost:9090`
 6. Routes DNS CNAMEs (with wrong-tunnel detection — auto-detects stale CNAMEs pointing to old tunnels)
 7. Installs systemd service → tunnel starts on boot
@@ -510,7 +559,7 @@ sudo bash scripts/cockpit-cloudflared.sh
 **After running:**
 
 - Cockpit: `https://cockpit.easyrentbali.com`
-- SSH: via `ssh minipc` (uses websocat ProxyCommand)
+- SSH: via `ssh it01` (uses websocat ProxyCommand)
 
 ---
 

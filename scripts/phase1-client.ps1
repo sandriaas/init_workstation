@@ -105,8 +105,8 @@ function Setup-SshConfig {
 
     $entry = @"
 
-# MiniPC via Cloudflare Tunnel
-Host minipc
+# it01 host via Cloudflare Tunnel
+Host it01
   HostName $tunnelHost
   ProxyCommand "$websocat" -E --binary - wss://%h
   User $serverUser
@@ -134,6 +134,6 @@ Write-Host ""
 Write-Host "╔══════════════════════════════════════════════╗" -ForegroundColor Green
 Write-Host "║   Done! Connect with:                        ║" -ForegroundColor Green
 Write-Host "║                                              ║" -ForegroundColor Green
-Write-Host "║   ssh minipc                                 ║" -ForegroundColor Green
+Write-Host "║   ssh it01                                   ║" -ForegroundColor Green
 Write-Host "╚══════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""

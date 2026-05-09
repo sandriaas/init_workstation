@@ -558,7 +558,7 @@ step_ssh() {
   sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
   sudo sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
   sudo systemctl reload sshd || sudo systemctl reload ssh || true
-  ok "Password authentication enabled — connect with: ssh minipc (enter your login password)"
+  ok "Password authentication enabled — client alias: ssh it01 (enter your login password)"
 }
 
 # =============================================================================
@@ -623,8 +623,6 @@ step_cloudflare_tunnel() {
       ask "Cloudflare API token: "; read -rs CF_TOKEN; echo ""
     fi
     cf_store_api_token "$CF_TOKEN"
-    ask "Cloudflare Account ID: "; read -r CF_ACCOUNT_ID
-    export CLOUDFLARE_TUNNEL_TOKEN="$CF_TOKEN"
     sudo -u "$CURRENT_USER" CLOUDFLARE_API_TOKEN="$CF_TOKEN" cloudflared tunnel login --no-browser 2>/dev/null \
       || { info "Falling back to token-based route DNS"; }
   else
@@ -644,8 +642,8 @@ step_cloudflare_tunnel() {
   TUNNEL_HOST="${TUNNEL_HOST:-$_host_default}"
   ask "Cockpit UI hostname [${_cockpit_default}]: "; read -r COCKPIT_HOST
   COCKPIT_HOST="${COCKPIT_HOST:-$_cockpit_default}"
-  ask "Tunnel name [minipc-ssh]: ";                  read -r TUNNEL_NAME
-  TUNNEL_NAME="${TUNNEL_NAME:-minipc-ssh}"
+  ask "Tunnel name [it01-ssh]: ";                    read -r TUNNEL_NAME
+  TUNNEL_NAME="${TUNNEL_NAME:-it01-ssh}"
 
   # Create tunnel
   info "Creating tunnel '$TUNNEL_NAME'..."
@@ -1037,7 +1035,7 @@ print_final_summary() {
   echo ""
   echo -e "${BOLD}  ┌─ SSH Access ───────────────────────────────────────────────${RESET}"
   printf "  │  %-18s %s\n" "LAN:"          "ssh ${CURRENT_USER}@${host_ip}"
-  printf "  │  %-18s %s\n" "Via tunnel:"   "ssh ${CURRENT_USER}@${TUNNEL_HOST_SAVED}"
+  printf "  │  %-18s %s\n" "Via tunnel:"   "ssh it01"
 
   echo ""
   echo -e "${BOLD}  ├─ Cockpit Web UI ──────────────────────────────────────────${RESET}"
@@ -1060,7 +1058,7 @@ print_final_summary() {
   echo -e "${BOLD}  ├─ Client Setup ────────────────────────────────────────────${RESET}"
   echo   "  │  Run on each client device (phone, laptop):"
   echo   "  │    bash <(curl -fsSL https://raw.githubusercontent.com/sandriaas/init_workstation/main/scripts/phase1-client.sh)"
-  echo   "  │  Then: ssh minipc"
+  echo   "  │  Then: ssh it01"
 
   echo ""
   echo -e "${BOLD}  └─ Next Steps ───────────────────────────────────────────────${RESET}"
