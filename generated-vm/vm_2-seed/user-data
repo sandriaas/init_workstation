@@ -1,0 +1,17 @@
+#cloud-config
+hostname: vm-2
+users:
+  - name: sandriaas
+    passwd: "$6$rounds=4096$GFODZWH6pRbsllKo$R.xWj.X94Pv/zV/Bs3cy3WDxXvQ1z25slwrKVbbi41WwsErzbz56rYwb7.arGnKE4vGjGpCEdY4QtC0wF/319/"
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    groups: [adm, sudo]
+ssh_pwauth: true
+chpasswd:
+  expire: false
+package_update: false
+package_upgrade: false
+runcmd:
+  - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
