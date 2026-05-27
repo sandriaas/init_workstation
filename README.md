@@ -353,6 +353,27 @@ Without this, libvirt VMs silently fail to get DHCP leases. Run once per host:
 sudo bash generated-vm/ufw-virbr0-allow.sh
 ```
 
+## Memory Management
+
+Hybrid tiered swap to prevent OOM kills on 24GB host running 2 VMs (12GB) + services.
+Configs and scripts live in `linux-ram/`.
+
+```bash
+# Apply configs + create 64GB btrfs swapfile (reboot after to resize zram)
+sudo bash linux-ram/apply-phases-3-8.sh
+```
+
+| Setting | Before | After |
+|---------|--------|-------|
+| zram | 92GB (ram×4) | 8GB (ram/3) |
+| Disk swap | none | 64GB (pri=10) |
+| swappiness | 150 | 60 |
+| Overcommit | heuristic (0) | same |
+| earlyoom | 4%/10% | 2%/5% + VM protection |
+| VM OOM | unprotected | oom_score_adj=-900 |
+
+See `linux-ram/README.md` for full docs and `linux-ram/plan.md` for the design decisions.
+
 ## VM Configuration Examples
 
 The `configs/` directory contains templates for different OS types.

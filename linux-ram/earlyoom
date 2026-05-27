@@ -1,0 +1,3 @@
+# earlyoom configuration
+# Relaxed thresholds: kill only at <2% RAM or <5% total swap
+EARLYOOM_ARGS="-m 2 -s 5 -r 3600 --avoid '(^|/)(init|systemd|Xorg|sddm|docker|containerd|podman|qemu-system|libvirtd)$' --prefer '(^|/)(electron|chrome|chromium|firefox|java|node)$'"
