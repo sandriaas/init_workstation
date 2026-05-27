@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# =============================================================================
+# cf-vm — Expose a VM service port via the host cloudflared tunnel
+# =============================================================================
+# Usage:
+#   ./scripts/cf-vm vm_2 31208
+#     → https://31208-minipc.easyrentbali.com
+#
+#   ./scripts/cf-vm vm_2 31208 chatwoot-zeabur
+#     → https://chatwoot-zeabur.easyrentbali.com
+#
+#   ./scripts/cf-vm list
+#     → Show all VM → IP mappings
+# =============================================================================
+set -euo pipefail
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
+BOLD='\033[1m'; RESET='\033[0m'
+info()    { echo -e "${CYAN}[INFO]${RESET} $*"; }
+ok()      { echo -e "${GREEN}[OK]${RESET}  $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET} $*"; }
+err()     { echo -e "${RED}[ERR]${RESET}  $*" >&2; }
+die()     { err "$@"; exit 1; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── Defaults ─────────────────────────────────────────────────────────────────
+DOMAIN_FILE="$HOME/.cloudflared/minipc-domain"
+CERT_FILE="$HOME/.cloudflared/cert.pem"
+CONFIG_FILE="$HOME/.cloudflared/config-minipc-local.yml"
+TUNNEL_ID="587b853d-f751-4cd5-a12f-fdb6b8f8243e"
+TUNNEL_TARGET="${TUNNEL_ID}.cfargotunnel.com"
+SERVICE_NAME="cloudflared-minipc-local"
+
+# ─── Static VM IP fallback map (if virsh is unavailable) ─────────────────────
+declare -A VM_IPS=(
+  ["vm_1"]="192.168.122.50"
+  ["vm_2"]="192.168.122.51"
+)
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+resolve_vm_ip() {
+  local vm="$1"
+
+  # Try virsh DHCP leases first
+  if command -v virsh &>/dev/null && sudo -n virsh net-dhcp-leases default &>/dev/null 2>&1; then
+    local ip
+    ip=$(sudo virsh net-dhcp-leases default 2>/dev/null | awk -v h="$vm" '$0 ~ h {print $5}' | cut -d/ -f1 | head -1)
+    [ -n "$ip" ] && { echo "$ip"; return 0; }
+  fi
+
+  # Fallback to static map
+  [ -n "${VM_IPS[$vm]:-}" ] && { echo "${VM_IPS[$vm]}"; return 0; }
+
+  return 1
+}
+
+load_domain() {
+  if [ -f "$DOMAIN_FILE" ]; then
+    cat "$DOMAIN_FILE"
+  else
+    echo "easyrentbali.com"
+  fi
+}
+
+load_api_token() {
+  if [ -f "$CERT_FILE" ]; then
+    grep -v "^-----" "$CERT_FILE" | base64 -d 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('apiToken',''))" 2>/dev/null || true
+  fi
+}
+
+load_zone_id() {
+  if [ -f "$CERT_FILE" ]; then
+    grep -v "^-----" "$CERT_FILE" | base64 -d 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('zoneID',''))" 2>/dev/null || true
+  fi
+}
+
+cf_api_cname() {
+  local token="$1" zone_id="$2" hostname="$3" action="${4:-create}"
+  local target="$TUNNEL_TARGET"
+
+  # 1) Check existing record
+  local existing record_id existing_content
+  existing=$(curl -sf --max-time 10 \
+    -H "Authorization: Bearer $token" \
+    "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records?name=${hostname}&type=CNAME" 2>/dev/null)
+
+  record_id=$(echo "$existing" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['result'][0]['id'] if r.get('result') else '')" 2>/dev/null || true)
+  existing_content=$(echo "$existing" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['result'][0]['content'] if r.get('result') else '')" 2>/dev/null || true)
+
+  # 2) Update or create
+  if [ -n "$record_id" ]; then
+    if [ "$existing_content" = "$target" ]; then
+      ok "CNAME already correct: ${hostname}"
+      return 0
+    fi
+    info "Updating CNAME: ${hostname} → ${target}"
+    curl -sf --max-time 10 -X PUT \
+      -H "Authorization: Bearer $token" \
+      -H "Content-Type: application/json" \
+      --data "{\"type\":\"CNAME\",\"name\":\"${hostname}\",\"content\":\"${target}\",\"proxied\":true}" \
+      "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records/${record_id}" \
+      | python3 -c "import sys,json; r=json.load(sys.stdin); sys.exit(0 if r.get('success') else 1)" \
+      && { ok "CNAME updated: ${hostname}"; return 0; } \
+      || { warn "Failed to update CNAME: ${hostname}"; return 1; }
+  fi
+
+  info "Creating CNAME: ${hostname} → ${target}"
+  curl -sf --max-time 10 -X POST \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    --data "{\"type\":\"CNAME\",\"name\":\"${hostname}\",\"content\":\"${target}\",\"proxied\":true}" \
+    "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records" \
+    | python3 -c "import sys,json; r=json.load(sys.stdin); sys.exit(0 if r.get('success') else 1)" \
+    && { ok "CNAME created: ${hostname}"; return 0; } \
+    || { warn "Failed to create CNAME: ${hostname}"; return 1; }
+}
+
+add_to_config() {
+  local hostname="$1" service="$2"
+
+  if [ ! -f "$CONFIG_FILE" ]; then
+    die "Config file not found: ${CONFIG_FILE}"
+  fi
+
+  if grep -q "hostname: ${hostname}" "$CONFIG_FILE" 2>/dev/null; then
+    ok "Already in config: ${hostname}"
+    return 0
+  fi
+
+  sed -i "/^  - service: http_status:404/i\\  - hostname: ${hostname}\n    service: ${service}" "$CONFIG_FILE"
+  ok "Added to config: ${hostname} → ${service}"
+}
+
+restart_service() {
+  if systemctl is-active "$SERVICE_NAME" &>/dev/null; then
+    echo "121212" | sudo -S systemctl restart "$SERVICE_NAME" 2>/dev/null && ok "Service restarted: ${SERVICE_NAME}" || {
+      warn "Failed to restart ${SERVICE_NAME} — run: sudo systemctl restart ${SERVICE_NAME}"
+      return 1
+    }
+  else
+    warn "Service ${SERVICE_NAME} not running — start it: sudo systemctl start ${SERVICE_NAME}"
+  fi
+}
+
+# ─── Commands ─────────────────────────────────────────────────────────────────
+cmd_list() {
+  echo ""
+  printf "  %-12s %s\n" "VM" "IP"
+  printf "  %-12s %s\n" "----------" "------------"
+
+  for vm in "${!VM_IPS[@]}"; do
+    local ip
+    ip=$(resolve_vm_ip "$vm" 2>/dev/null || echo "${VM_IPS[$vm]}")
+    printf "  %-12s %s\n" "$vm" "$ip"
+  done
+
+  # Also list VMs from virsh that aren't in the static map
+  if command -v virsh &>/dev/null; then
+    while IFS= read -r v; do
+      [ -n "$v" ] || continue
+      [ -n "${VM_IPS[$v]:-}" ] && continue
+      local ip
+      ip=$(resolve_vm_ip "$v" 2>/dev/null || echo "unknown")
+      printf "  %-12s %s\n" "$v" "$ip"
+    done < <(virsh list --name 2>/dev/null | grep -v '^$' || true)
+  fi
+  echo ""
+}
+
+cmd_add() {
+  local vm="${1:-}" port="${2:-}" subdomain="${3:-}"
+
+  if [ -z "$vm" ] || [ -z "$port" ]; then
+    echo ""
+    echo "  Usage: cf-vm <vm_name> <port> [subdomain]"
+    echo ""
+    echo "  Examples:"
+    echo "    cf-vm vm_2 31208"
+    echo "    cf-vm vm_2 31208 chatwoot-zeabur"
+    echo "    cf-vm list"
+    echo ""
+    exit 1
+  fi
+
+  if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+    die "Invalid port: $port"
+  fi
+
+  # Resolve VM → IP
+  local ip
+  ip=$(resolve_vm_ip "$vm") || die "Cannot resolve IP for VM: $vm (is it running?)"
+  ok "VM '$vm' → IP $ip"
+
+  # Domain
+  local domain
+  domain=$(load_domain)
+  ok "Domain: $domain"
+
+  # Hostname
+  local hostname
+  if [ -n "$subdomain" ]; then
+    hostname="${subdomain}.${domain}"
+  else
+    hostname="${port}-minipc.${domain}"
+  fi
+  info "Hostname: ${hostname}"
+
+  # ── Add to tunnel config ──
+  local service="http://${ip}:${port}"
+  add_to_config "$hostname" "$service"
+
+  # ── DNS CNAME ──
+  local api_token zone_id
+  api_token=$(load_api_token)
+  zone_id=$(load_zone_id)
+
+  if [ -n "$api_token" ] && [ -n "$zone_id" ]; then
+    cf_api_cname "$api_token" "$zone_id" "$hostname"
+  else
+    warn "No API token/zone ID — skipping DNS. Create CNAME manually:"
+    warn "  ${hostname} → ${TUNNEL_TARGET}"
+  fi
+
+  # ── Restart ──
+  restart_service
+
+  # ── Summary ──
+  echo ""
+  echo -e "  ${BOLD}${GREEN}Done.${RESET}"
+  echo -e "  ${GREEN}https://${hostname}${RESET}  →  ${service}"
+  echo ""
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+case "${1:-}" in
+  list|ls)
+    cmd_list
+    ;;
+  *)
+    cmd_add "$@"
+    ;;
+esac
