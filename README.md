@@ -374,6 +374,8 @@ sudo bash linux-ram/apply-phases-3-8.sh
 
 See `linux-ram/README.md` for full docs and `linux-ram/plan.md` for the design decisions.
 
+For applying the same swap+sysctl tuning inside VMs, see `linux-ram-vm/`.
+
 ## VM Configuration Examples
 
 The `configs/` directory contains templates for different OS types.

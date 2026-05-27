@@ -73,4 +73,15 @@ ssh sandriaas@192.168.122.51
 | Graphics | None (headless) | VNC (Cockpit-accessible) |
 | Autostart | yes | no |
 
+## Memory Management
+
+Host-style swap + sysctl tuning from `linux-ram-vm/` applied:
+- 8 GB disk swap (/swapfile, pri=10)
+- swappiness=60, overcommit=0, page-cluster=0
+
+```bash
+# Re-apply if VM is recreated
+sudo bash linux-ram-vm/apply.sh
+```
+
 Both VMs share the same disk lineage (Ubuntu cloud image, 32 GB qcow2).
