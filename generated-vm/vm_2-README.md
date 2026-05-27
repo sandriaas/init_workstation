@@ -71,7 +71,7 @@ ssh sandriaas@192.168.122.51
 | RAM | 4 GB | 6 GB |
 | Network | Static `192.168.122.50` | DHCP reserved `192.168.122.51` |
 | Graphics | None (headless) | VNC (Cockpit-accessible) |
-| Autostart | yes | no |
+| Autostart | no | yes |
 
 ## Memory Management
 
