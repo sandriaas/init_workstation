@@ -282,40 +282,111 @@ sudo k3s kubectl delete pod nats-0 -n default
 
 ### Why WSL DNS Fails
 
-WSL2 uses a virtualized network with an internal DNS proxy (10.255.255.254). This proxy sometimes fails to resolve external domains like `registry-1.docker.io`, causing image pull failures in k3s.
+WSL2 uses a virtualized network with an internal DNS proxy (10.255.255.254). This proxy sometimes fails to resolve external domains like `registry-1.docker.io`, causing image pull failures in k3s. The internal DNS also can't handle high-volume queries from container runtimes well.
 
-### Permanent DNS Fix
+### Best Practice: Multi-Layer DNS Fix (Recommended)
 
-1. **Disable WSL auto-generation** of `/etc/resolv.conf`:
-   ```ini
-   # /etc/wsl.conf
-   [network]
-   generateResolvConf = false
-   ```
+Apply **all three layers** for maximum reliability:
 
-2. **Set public DNS**:
-   ```bash
-   sudo tee /etc/resolv.conf <<'EOF'
-   nameserver 8.8.8.8
-   nameserver 1.1.1.1
-   EOF
-   ```
+#### Layer 1: Disable WSL Auto-Generated resolv.conf
 
-3. **Verify**:
-   ```bash
-   getent hosts registry-1.docker.io
-   nslookup registry-1.docker.io 8.8.8.8
-   ```
+```ini
+# /etc/wsl.conf
+[boot]
+systemd=true
 
-### Alternative: Use WSL Mirrored Mode
+[user]
+default=zeabur
 
-Windows 11 22H2+ supports mirrored networking mode where WSL shares the host's network interfaces. This can improve DNS resolution but only works for one WSL instance at a time.
+[network]
+generateResolvConf = false
+```
+
+#### Layer 2: Static resolv.conf (Immutable)
+
+```bash
+# Remove the symlink
+sudo rm /etc/resolv.conf
+
+# Create static file with 3 public DNS servers (redundancy)
+printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\nnameserver 9.9.9.9\n' | \
+  sudo tee /etc/resolv.conf
+
+# Make immutable so WSL/systemd can't overwrite it
+sudo chattr +i /etc/resolv.conf
+
+# Restart WSL to apply (from PowerShell)
+# wsl --shutdown
+```
+
+**Why three DNS servers?**
+- `8.8.8.8` (Google) - Fast, reliable, global anycast
+- `1.1.1.1` (Cloudflare) - Privacy-focused, very fast
+- `9.9.9.9` (Quad9) - Security-focused, blocks malicious domains
+
+Fallback ensures DNS works even if one provider has issues.
+
+#### Layer 3: Enable DNS Tunneling (Backup)
 
 ```ini
 # C:\Users\<user>\.wslconfig
 [wsl2]
-networkingMode=mirrored
+dnsTunneling=true
+networkingMode=nat
+memory=8GB
+processors=4
+swap=2GB
 ```
+
+**DNS Tunneling** resolves DNS through a virtualization layer instead of relying on `/etc/resolv.conf`. This is the modern Windows 11 approach and handles network changes automatically (VPN, WiFi switches, etc.).
+
+#### Layer 4 (Optional): Docker Daemon DNS
+
+If running Docker in WSL (not via k3s), add daemon-level fallback:
+
+```json
+# /etc/docker/daemon.json
+{
+  "dns": ["1.1.1.1", "8.8.8.8"],
+  "registry-mirrors": [
+    "https://docker.m.daocloud.io"
+  ]
+}
+```
+
+### Verification
+
+```bash
+# Check resolv.conf is static (not a symlink)
+ls -la /etc/resolv.conf
+# Expected: -rw-r--r-- 1 root root 57 ... /etc/resolv.conf
+# NOT: lrwxrwxrwx ... /etc/resolv.conf -> /mnt/wsl/resolv.conf
+
+# Check DNS works
+getent hosts registry-1.docker.io
+# Expected: 2600:1f18:... registry-1.docker.io
+
+# Test image pull
+sudo k3s kubectl run test --rm -it --image=alpine -- nslookup google.com
+```
+
+### Common DNS Configurations
+
+| Use Case | DNS Servers |
+|----------|-------------|
+| **General (recommended)** | `8.8.8.8`, `1.1.1.1`, `9.9.9.9` |
+| **Privacy-focused** | `1.1.1.1`, `9.9.9.9` |
+| **Corporate VPN** | `10.0.0.1` (gateway), `8.8.8.8` (fallback) |
+| **China region** | `223.5.5.5`, `119.29.29.29` |
+
+### Why `chattr +i`?
+
+The `chattr +i` command makes the file immutable at the filesystem level. This prevents:
+- WSL from overwriting it on restart
+- systemd-resolved from replacing it with a symlink
+- Any process from modifying it
+
+This is the **only reliable way** to keep DNS settings permanent in WSL2.
 
 ---
 
