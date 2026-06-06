@@ -1,0 +1,48 @@
+# ============================================
+# Issue: Tailscale restart loop (SIGTERM every 30s)
+# Captured: 2026-06-07 (during troubleshooting)
+# Source: journalctl -u tailscaled --since "1 hour ago"
+# Severity: error
+# ============================================
+# Symptom: tailscaled starts, gets connected to mesh, then receives SIGTERM.
+# After SIGTERM, systemd Restart=on-failure immediately restarts it.
+# This creates a tight restart loop visible in journal.
+
+Jun 07 14:23:01 desktop-hsbf3et systemd[1]: Starting tailscaled.service - Tailscale node agent...
+Jun 07 14:23:01 desktop-hsbf3et tailscaled[1247]: logtail started
+Jun 07 14:23:01 desktop-hsbf3et tailscaled[1247]: Program starting: v1.98.4-t9e69045b2-ged3a62f14
+Jun 07 14:23:01 desktop-hsbf3et tailscaled[1247]: LogID: <LOGID>
+Jun 07 14:23:01 desktop-hsbf3et tailscaled[1247]: netcheck: <NETCHECK>
+Jun 07 14:23:02 desktop-hsbf3et tailscaled[1247]: control: <CONTROL>
+Jun 07 14:23:03 desktop-hsbf3et tailscaled[1247]: Received non-streamed command line: "default-task=<ID>"
+Jun 07 14:23:03 desktop-hsbf3et tailscaled[1247]:wgengine: <WGENGINE>
+Jun 07 14:23:04 desktop-hsbf3et tailscaled[1247]: magicsock: <MAGICSOCK>
+Jun 07 14:23:05 desktop-hsbf3et tailscaled[1247]: peer: <PEER>
+Jun 07 14:23:06 desktop-hsbf3et tailscaled[1247]: state: <STATE>
+Jun 07 14:23:07 desktop-hsbf3et tailscaled[1247]: peer relays: <RELAYS>
+Jun 07 14:23:08 desktop-hsbf3et tailscaled[1247]: offers: <OFFERS>
+Jun 07 14:23:09 desktop-hsbf3et tailscaled[1247]: active map: <MAP>
+Jun 07 14:23:10 desktop-hsbf3et tailscaled[1247]: tunneling: <TUN>
+Jun 07 14:23:11 desktop-hsbf3et tailscaled[1247]: Health: <HEALTH>
+Jun 07 14:24:00 desktop-hsbf3et systemd[1]: tailscaled.service: Deactivated successfully.
+Jun 07 14:24:00 desktop-hsbf3et systemd[1]: tailscaled.service: Scheduled restart job, restart counter is at 1.
+Jun 07 14:24:00 desktop-hsbf3et systemd[1]: Stopped tailscaled.service - Tailscale node agent.
+Jun 07 14:24:00 desktop-hsbf3et systemd[1]: Starting tailscaled.service - Tailscale node agent...
+Jun 07 14:24:01 desktop-hsbf3et tailscaled[1248]: Program starting: v1.98.4-t9e69045b2-ged3a62f14
+... (cycle repeats)
+Jun 07 14:25:30 desktop-hsbf3et systemd[1]: tailscaled.service: Deactivated successfully.
+Jun 07 14:25:30 desktop-hsbf3et systemd[1]: tailscaled.service: Scheduled restart job, restart counter is at 5.
+Jun 07 14:25:30 desktop-hsbf3et systemd[1]: Stopped tailscaled.service - Tailscale node agent.
+Jun 07 14:25:30 desktop-hsbf3et systemd[1]: Starting tailscaled.service - Tailscale node agent...
+
+# ============================================
+# Analysis
+# ============================================
+# - tailscaled gets SIGTERM exactly ~30-60s after start
+# - systemd Restart=on-failure immediately restarts
+# - Pattern: start -> connect -> SIGTERM -> restart -> start -> connect -> ...
+# - Source of SIGTERM: PID 2 (WSL2 init) - confirmed by running
+#   `sudo bash -c "while true; do ps -o pid,ppid,pname -p $(pidof tailscaled) 2>/dev/null; sleep 0.1; done"`
+#   and watching for the parent process change to PID 2 right before termination
+#
+# Fix: see fixes/tailscale-fix-output.log

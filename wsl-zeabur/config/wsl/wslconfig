@@ -1,0 +1,21 @@
+[wsl2]
+# Networking mode: nat is the default and works for most cases
+# mirrored (Win11 22H2+) shares host network but only one WSL at a time
+networkingMode=nat
+
+# Memory limit for the WSL2 VM
+memory=8GB
+
+# CPU core allocation
+processors=4
+
+# Swap size (helps when memory is pressured)
+swap=2GB
+
+# Notes on settings that BROKE the setup:
+# - dnsTunneling=true caused Tailscale mesh to flap every 30s
+# - autoMemoryReclaim (WSL 2.6.3.0+ only) - unknown key on older versions
+# - defaultVhdSize - leave default, no need to customize
+
+# For the WSL2 distro name (set when importing/creating, not in this file):
+# wsl --install -d Ubuntu-24.04 --name wsl_test_server_001

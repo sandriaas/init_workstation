@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  # Drop this file at /var/lib/rancher/k3s/server/manifests/
+  # to make it auto-deploy on every k3s restart
+  rewrite.server: |
+    nats.zeabur.com {
+      errors
+      cache 30
+      rewrite name regex nats\.zeabur\.com nats.default.svc.cluster.local
+      forward . /etc/resolv.conf
+    }

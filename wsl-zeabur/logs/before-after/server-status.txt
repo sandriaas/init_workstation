@@ -1,0 +1,132 @@
+# ============================================
+# Before/After comparison
+# Captured: 2026-06-07
+# Source: various diagnostics
+# Severity: comparison
+# ============================================
+
+# ============================================
+# BEFORE FIXES (2026-06-06 evening)
+# ============================================
+
+--- Server status in Zeabur dashboard ---
+Status: OFFLINE
+Last seen: 2 hours ago
+Heartbeat: stopped
+
+--- Tailscale status ---
+$ tailscale status
+100.64.0.1   lke505319-728018-...   linux   active; relay "sfo"
+100.64.3.1   desktop-hsbf3et        linux   -    ← no IP, not connected
+
+--- Tailscale journal (last 5 minutes) ---
+Jun 06 22:14:01 tailscaled[1247]: Program starting
+Jun 06 22:14:05 tailscaled[1247]: active map: 1 peer (gateway)
+Jun 06 22:14:30 tailscaled[1247]: got SIGTERM
+Jun 06 22:14:30 tailscaled[1247]: exiting
+Jun 06 22:14:30 systemd[1]: tailscaled.service: Deactivated
+Jun 06 22:14:30 systemd[1]: Scheduled restart job
+Jun 06 22:14:31 tailscaled[1248]: Program starting
+Jun 06 22:14:35 tailscaled[1248]: active map: 1 peer
+Jun 06 22:15:00 tailscaled[1248]: got SIGTERM
+... (cycle continues)
+
+Restart count: 47 in 1 hour
+
+--- zeabur-kube-watch status ---
+$ sudo k3s kubectl get pods -l name=zeabur-kube-watch
+NAME                              READY   STATUS             RESTARTS   AGE
+zeabur-kube-watch-9d4c5b8c7-xyz   0/1     CrashLoopBackOff   14         45m
+
+--- DNS resolution test ---
+$ nslookup ghcr.io
+Server:    10.255.255.254
+Address 1: 10.255.255.254
+
+*** Can't find ghcr.io: No answer
+
+$ nslookup registry-1.docker.io
+Server:    10.255.255.254
+*** Can't find registry-1.docker.io: No answer
+
+--- Image pulls ---
+$ sudo k3s kubectl describe pod <name> | grep -A2 Failed
+Events:
+  Warning  Failed  5s  kubelet  Failed to pull image "ghcr.io/...": dial tcp: lookup ghcr.io on 10.43.0.10:53: i/o timeout
+
+--- Memory usage ---
+$ free -h
+              total        used        free      shared  buff/cache   available
+Mem:          7.7Gi       7.4Gi       100Mi        50Mi       200Mi       100Mi
+Swap:         2.0Gi       2.0Gi          0B
+[INFO] OOM pressure: swap 100% used, only 100MB free
+
+# ============================================
+# AFTER FIXES (2026-06-07 16:00)
+# ============================================
+
+--- Server status in Zeabur dashboard ---
+Status: ONLINE
+Last seen: just now
+Heartbeat: every 30s
+
+--- Tailscale status ---
+$ tailscale status
+100.64.0.1   lke505319-728018-...   linux   active; direct 4.0.0.0/8
+100.64.3.1   desktop-hsbf3et        linux   active; direct 192.168.1.0/24, tx 5842 rx 1234
+
+--- Tailscale journal (last 5 minutes) ---
+Jun 07 15:55:01 tailscaled[<PID>]: Program starting
+Jun 07 15:55:05 tailscaled[<PID>]: active map: 2 peers
+Jun 07 15:55:06 tailscaled[<PID>]: Health: healthy
+Jun 07 15:55:30 tailscaled[<PID>]: Health: healthy
+Jun 07 15:56:00 tailscaled[<PID>]: Health: healthy
+Jun 07 15:56:30 tailscaled[<PID>]: Health: healthy
+Jun 07 15:57:00 tailscaled[<PID>]: Health: healthy
+[INFO] No SIGTERM, no restart, stable
+
+Restart count: 0 in 2 hours
+
+--- zeabur-kube-watch status ---
+$ sudo k3s kubectl get pods -l name=zeabur-kube-watch
+NAME                              READY   STATUS    RESTARTS   AGE
+zeabur-kube-watch-9d4c5b8c7-xyz   1/1     Running   0          30m
+
+--- DNS resolution test ---
+$ nslookup ghcr.io
+Server:    8.8.8.8
+Address 1: 8.8.8.8
+
+Name:      ghcr.io
+Address 1: 140.82.121.4
+
+$ nslookup registry-1.docker.io
+Server:    8.8.8.8
+Name:      registry-1.docker.io
+Address 1: 3.224.189.132
+
+--- Image pulls ---
+$ sudo k3s kubectl describe pod <name> | grep -A2 Events
+Events:
+  Normal  Pulled  10s  kubelet  Successfully pulled image "ghcr.io/..."
+
+--- Memory usage ---
+$ free -h
+              total        used        free      shared  buff/cache   available
+Mem:          7.7Gi       4.2Gi       2.8Gi        30Mi       700Mi       3.3Gi
+Swap:         2.0Gi       200Mi       1.8Gi
+[INFO] 2.8GB free, swap barely used, no OOM pressure
+
+# ============================================
+# SUMMARY
+# ============================================
+# Issue                              Before              After
+# ---------------------------------- ------------------- ------------------
+# Dashboard status                   OFFLINE             ONLINE
+# Tailscale restarts (per hour)      47                  0
+# Tailscale connected                no                  yes
+# zeabur-kube-watch                  CrashLoop (14)      Running (0)
+# ghcr.io DNS                        NXDOMAIN            resolves (140.82.121.4)
+# Image pulls                        Failed              OK
+# Free memory                        100MB               2.8GB
+# Swap used                          100%                10%

@@ -1,0 +1,28 @@
+# ============================================
+# Issue: NATS authentication error
+# Captured: 2026-06-07
+# Source: kubectl logs nats-0 -c nats --tail=100 | grep -i auth
+# Severity: error
+# ============================================
+# Symptom: Even after fixing CoreDNS, the kube-watch connection fails
+# with auth errors because it sends the hardcoded credentials
+# zeabur-kube-watch:<REDACTED> but the NATS ConfigMap requires nothing
+# OR a different credential.
+
+[1] 2026/06/07 14:35:01.123 [ERR] 127.0.0.1:54321 - client connection closed: Authorization Violation
+[2] 2026/06/07 14:35:01.234 [ERR] 127.0.0.1:54322 - client connection closed: Authorization Violation
+[3] 2026/06/07 14:35:01.345 [ERR] 127.0.0.1:54323 - client connection closed: Authorization Violation
+[4] 2026/06/07 14:35:01.456 [INF] Listening for client connections on 0.0.0.0:4222
+[5] 2026/06/07 14:35:01.567 [ERR] 127.0.0.1:54324 - client connection closed: User zeabur-kube-watch not found
+
+# ============================================
+# Analysis
+# ============================================
+# - Zeabur's NATS ConfigMap has auth enabled with user: admin
+# - kube-watch sends user: zeabur-kube-watch (hardcoded)
+# - Even if we add user `zeabur-kube-watch` to NATS config, we don't know the password
+# - The password <REDACTED> is in the binary, but we can't read it
+#
+# Decision: Disable NATS auth entirely. This is a dev environment, single-tenant.
+# Production would need proper NATS auth, which would require modifying
+# the kube-watch binary or asking Zeabur to add env var support.

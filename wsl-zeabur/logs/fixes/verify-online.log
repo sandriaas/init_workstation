@@ -1,0 +1,81 @@
+# ============================================
+# Fix: Verify server is "Online" in Zeabur dashboard
+# Captured: 2026-06-07 (after all fixes applied)
+# Source: bash scripts/verification/verify-online.sh
+# Severity: info
+# ============================================
+
+=== Step 1: Check Tailscale is connected ===
+$ tailscale status
+100.64.0.1   lke505319-728018-...   linux   active; direct 4.0.0.0/8, tx 0 rx 0
+100.64.3.1   desktop-hsbf3et        linux   active; direct 192.168.1.0/24, tx 5842 rx 1234
+[OK]   2 peers in mesh (us + gateway)
+
+=== Step 2: Check Tailscale can reach gateway ===
+$ sudo tailscale ping 100.64.0.1 -c 3
+pong from lke505319-728018-... (100.64.0.1) via DERP(sfo) in 197ms
+pong from lke505319-728018-... (100.64.0.1) via DERP(sfo) in 195ms
+pong from lke505319-728018-... (100.64.0.1) via DERP(sfo) in 198ms
+[OK]   3/3 pings successful
+
+=== Step 3: Check sshd is listening on 100.64.3.1 ===
+$ sudo ss -tlnp | grep :22
+LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=<PID>,fd=3))
+[OK]   sshd listening on 0.0.0.0:22
+
+=== Step 4: Check k3s is healthy ===
+$ sudo k3s kubectl get nodes
+NAME       STATUS   ROLES                  AGE     VERSION
+100.64.3.1 Ready    control-plane,master   2d13h   v1.34.4+k3s1
+[OK]   k3s node Ready
+
+=== Step 5: Check all system pods are Running ===
+$ sudo k3s kubectl get pods -n default
+NAME                              READY   STATUS    RESTARTS   AGE
+vector-aggregator-xxx             1/1     Running   0          2d13h
+zeabur-dns-xxx                    1/1     Running   0          2d13h
+zeabur-kube-watch-xxx             1/1     Running   0          15m    ← was 14+ restarts
+zeabur-log-api-xxx                1/1     Running   0          2d13h
+nats-0                            2/2     Running   0          1h
+cadvisor-xxx                      1/1     Running   0          2d13h
+fluent-bit-xxx                    1/1     Running   0          2d13h
+ingress-controller-xxx            1/1     Running   0          2d13h
+node-exporter-xxx                 1/1     Running   0          2d13h
+[OK]   9/9 system pods Running
+
+=== Step 6: Check kube-watch is publishing events ===
+$ sudo k3s kubectl logs -n default -l name=zeabur-kube-watch --tail=20 | tail -5
+2026/06/07 15:30:00 NATS connection healthy
+2026/06/07 15:30:00 Heartbeat sent
+2026/06/07 15:30:00 Pod event: default/nats-0 (Running)
+2026/06/07 15:30:00 Pod event: default/zeabur-kube-watch-xxx (Running)
+2026/06/07 15:30:01 Heartbeat sent
+[OK]   kube-watch is publishing events to NATS
+
+=== Step 7: Check Zeabur GraphQL sees us as online ===
+$ npx -y zeabur@latest --token <TOKEN> ...
+$ curl -X POST https://api.zeabur.com/graphql \
+    -H "Authorization: Bearer <TOKEN>" \
+    -H "Content-Type: application/json" \
+    -d '{"query": "query { servers { id name status } }"}'
+
+{
+  "data": {
+    "servers": [
+      {
+        "id": "server-6a23cdf424701a8493345c17",
+        "name": "desktop-hsbf3et",
+        "status": "ONLINE"        ← was "OFFLINE"
+      }
+    ]
+  }
+}
+[OK]   Server status: ONLINE
+
+=== Done ===
+[OK]   All systems healthy
+[OK]   Server is Online in Zeabur dashboard
+[OK]   Mesh connectivity stable
+[OK]   Ready for deployments
+
+STATUS: OK

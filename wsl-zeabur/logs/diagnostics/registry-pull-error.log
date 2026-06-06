@@ -1,0 +1,31 @@
+# ============================================
+# Issue: Image pull errors (registry-1.docker.io, ghcr.io)
+# Captured: 2026-06-07
+# Source: kubectl describe pod <name> | grep -A5 Events
+# Severity: error
+# ============================================
+# Symptom: New pods can't pull images because DNS resolution fails
+# for public registries. WSL2's internal DNS proxy (10.255.255.254)
+# returns NXDOMAIN for some queries.
+
+Events:
+  Type     Reason     Age               From               Message
+  ----     ------     ----              ----               -------
+  Normal   Scheduled  10s               default-scheduler  Successfully assigned default/myapp to 100.64.3.1
+  Normal   Pulling    9s                kubelet            Pulling image "ghcr.io/sandriaas/myapp:latest"
+  Warning  Failed     5s                kubelet            Failed to pull image "ghcr.io/sandriaas/myapp:latest": rpc error: code = Unknown desc = failed to resolve reference "ghcr.io/sandriaas/myapp:latest": failed to do request: Head "https://ghcr.io/v2/": dial tcp: lookup ghcr.io on 10.43.0.10:53: i/o timeout
+  Warning  Failed     3s                kubelet            Error: ErrImagePull
+  Normal   BackOff    3s                kubelet            Back-off pulling image "ghcr.io/sandriaas/myapp:latest"
+  Warning  Failed     1s                kubelet            Error: ImagePullBackOff
+
+# ============================================
+# Analysis
+# ============================================
+# - Pod's /etc/resolv.conf points to 10.43.0.10 (CoreDNS)
+# - CoreDNS forwards to /etc/resolv.conf (set by k3s to /etc/resolv.kubelet.conf)
+# - /etc/resolv.kubelet.conf in WSL2 has nameserver 10.255.255.254 (WSL2 DNS proxy)
+# - WSL2 DNS proxy can't resolve some external hosts (registry-1.docker.io, ghcr.io)
+#
+# Fix: Override /etc/resolv.conf to public DNS (8.8.8.8, 1.1.1.1, 9.9.9.9)
+# AND make it immutable (chattr +i) so WSL doesn't regenerate it.
+# Then re-deploy CoreDNS to use the new upstream.

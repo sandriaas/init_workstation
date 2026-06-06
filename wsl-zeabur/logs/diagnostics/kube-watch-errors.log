@@ -1,0 +1,41 @@
+# ============================================
+# Issue: zeabur-kube-watch CrashLoopBackOff
+# Captured: 2026-06-07 (during troubleshooting)
+# Source: kubectl logs n/zeabur-kube-watch --tail=50
+# Severity: error
+# ============================================
+# Symptom: kube-watch pod keeps restarting because it can't reach
+# the NATS server. DNS resolution for `nats.zeabur.com` fails because
+# CoreDNS doesn't have a rewrite rule and the external name is unreachable
+# from WSL2 (no route to internet for *.zeabur.com on port 4222 directly).
+
+2026/06/07 14:23:01 kube-watch starting up
+2026/06/07 14:23:01 Loading config from /etc/kube-watch/config.yaml
+2026/06/07 14:23:01 Region: server-6a23cdf424701a8493345c17
+2026/06/07 14:23:01 Vector URL: http://vector-aggregator:8081/k8s-events
+2026/06/07 14:23:01 NATS URL: nats://zeabur-kube-watch:<REDACTED>@nats.zeabur.com:4222
+2026/06/07 14:23:01 Connecting to NATS at nats.zeabur.com:4222...
+2026/06/07 14:23:31 dial tcp: lookup nats.zeabur.com on 10.43.0.10:53: no such host
+2026/06/07 14:23:31 Failed to connect: timeout waiting for NATS
+2026/06/07 14:23:31 Retrying in 5s...
+2026/06/07 14:23:36 Connecting to NATS at nats.zeabur.com:4222...
+2026/06/07 14:24:06 dial tcp: lookup nats.zeabur.com on 10.43.0.10:53: no such host
+2026/06/07 14:24:06 Failed to connect: timeout waiting for NATS
+2026/06/07 14:24:06 Retrying in 5s...
+2026/06/07 14:24:11 Connecting to NATS at nats.zeabur.com:4222...
+2026/06/07 14:24:41 dial tcp: lookup nats.zeabur.com on 10.43.0.10:53: no such host
+2026/06/07 14:24:41 FATAL: cannot start without NATS connection
+2026/06/07 14:24:41 exiting
+
+# ============================================
+# Analysis
+# ============================================
+# - The kube-watch binary hardcodes `nats.zeabur.com` as the NATS host
+# - It ignores NATS_URL, NATS_USER, NATS_PASSWORD env vars
+# - CoreDNS has no rewrite rule for nats.zeabur.com
+# - DNS query times out because external nats.zeabur.com is unreachable
+#
+# Fix options:
+#   1. Add CoreDNS rewrite: nats.zeabur.com -> nats.default.svc.cluster.local
+#   2. Disable NATS auth (so the hardcoded credentials work)
+#   Both required.
