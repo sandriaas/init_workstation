@@ -1,12 +1,98 @@
-# Codex-Auth: Inspecting, Importing, and Diagnosing a 15th Account
+# Codex-Auth: Importing, Diagnosing, and Reference
 
-Session log of investigating the `~/.codex/accounts/` directory, importing a CLIProxyAPI (CPA) flat-token JSON as a 15th account via `codex-auth`, and diagnosing why the imported account shows HTTP 401 on the usage API.
+Reference for importing ChatGPT/Codex account snapshots into `~/.codex/accounts/` via `codex-auth`, with two worked case studies: a CLIProxyAPI (CPA) flat-token import (15th account) that turned out to have a server-revoked token, and a ChatGPT web-session bootstrap import (16th account) that required manual conversion and a synthetic `id_token`.
 
 ## Context
 
-The user has 14 ChatGPT OAuth account snapshots stored in `~/.codex/accounts/*.auth.json` plus a `registry.json` index. They received a single flat-token JSON (the CPA/CLIProxyAPI format) and asked whether it could be added as a 15th account using the same file format.
+The user has 16 ChatGPT OAuth account snapshots stored in `~/.codex/accounts/*.auth.json` plus a `registry.json` index. Two non-standard blobs were imported into the set: a 15th account from a CLIProxyAPI (CPA) flat-token JSON (turned out to have a server-revoked token), and a 16th account from a ChatGPT web-session bootstrap JSON (no `refresh_token`, required a synthetic `id_token`).
 
 Working directory: `/home/sandriaas/_projects/minipc` (project files; auth lives outside the repo at `~/.codex/`).
+
+## Quick Reference
+
+### Which import path for which blob shape?
+
+| Blob shape | Telltale fields | Tool path | Refreshable? |
+|---|---|---|---|
+| **ChatGPT OAuth snapshot** (the 14 originals) | `tokens.{id_token,access_token,refresh_token,account_id}`, `auth_mode: "chatgpt"` | already in place | yes |
+| **CLIProxyAPI flat** (`type: "codex"`) | `access_token`, `refresh_token`, `id_token`, `account_id`, `email`, all top-level | `codex-auth import --cpa <file>` | yes |
+| **ChatGPT web-session bootstrap** (DevTools / `__remixContext`) | `accessToken` (camelCase), `sessionToken` (JWE), `user`, `account`, `expires`, **no `refresh_token`** | manual write + `codex-auth import --purge` | **no** |
+
+### Standard import flow
+
+```bash
+# 1. Backup (always — even for --cpa)
+BACKUP=~/.codex/accounts.backup.$(date +%Y%m%d-%H%M%S)
+cp -a ~/.codex/accounts "$BACKUP"
+
+# 2. Stage
+chmod 600 /tmp/codex-import-<id>.json
+
+# 3a. CPA flat format
+codex-auth import --cpa /tmp/codex-import-<id>.json
+
+# 3b. Web-session format (no refresh_token)
+#    Compute filename, write file with synthetic id_token, register
+b64u() { printf '%s' "$1" | base64 -w0 | tr '+/' '-_' | tr -d '='; }
+FILE=~/.codex/accounts/$(b64u "user-<user_id>")::$(b64u "<uuid>").auth.json
+# ... write JSON (see section 10) ...
+chmod 600 "$FILE"
+codex-auth import --purge
+
+# 4. Verify
+codex-auth list
+ls ~/.codex/accounts/*.auth.json | wc -l
+
+# 5. Liveness test (always)
+TOK=$(jq -r '.tokens.access_token' <new_auth_file>)
+curl -sS -o /tmp/wham.json -w "HTTP %{http_code}\n" \
+  -H "Authorization: Bearer $TOK" -H "Accept: application/json" \
+  "https://chatgpt.com/backend-api/wham/usage"
+
+# 6. Cleanup
+shred -u /tmp/codex-import-<id>.json /tmp/wham.json
+```
+
+### Filename convention
+
+```
+<b64(user-...)>::<b64(uuid)>.auth.json
+```
+
+`b64u` is base64url (no padding, `-_` instead of `+/`):
+
+```bash
+b64u() { printf '%s' "$1" | base64 -w0 | tr '+/' '-_' | tr -d '='; }
+```
+
+### Liveness test (after any import)
+
+```bash
+TOK=$(jq -r '.tokens.access_token' <new_auth_file>)
+curl -sS -o /tmp/wham.json -w "HTTP %{http_code}\n" \
+  -H "Authorization: Bearer $TOK" -H "Accept: application/json" \
+  "https://chatgpt.com/backend-api/wham/usage"
+jq -c '{email, plan_type, primary: .rate_limit.primary_window.used_percent, weekly: .rate_limit.secondary_window.used_percent}' /tmp/wham.json
+shred -u /tmp/wham.json
+```
+
+| HTTP code | Meaning |
+|---|---|
+| 200 | Live, safe to switch |
+| 401 `token_invalidated` | Server-side revoked — dead, do not bother switching |
+| 401 other | Wrong audience/scope, try a different endpoint |
+| 403 + Cloudflare challenge | Browser-gated endpoint, not usable from CLI |
+
+### Common pitfalls
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `--cpa`: `MissingRefreshToken` | Blob is web-session, not CPA | Switch to manual write path (section 10) |
+| `--purge`: `MissingEmail` (or file silently skipped from registry) | `id_token` lacks standard top-level `email` claim (web-session access tokens put email under `https://api.openai.com/profile.email`) | Construct a synthetic `id_token` JWT with `email` at payload root |
+| New file mode 0644, others 0600 | `--cpa` import doesn't preserve umask | `chmod 600` after import for parity |
+| `last_used_at: null` in list | Never `codex-auth switch`ed to it | Normal until first use; flips to `Now` after switch |
+| `last_usage: null` in list | No successful API refresh yet | Triggers automatically on next `list` / `status` |
+| `401` in list table | Tool prints the raw integer `used_percent` value, which on a failed refresh can be the HTTP status code | Run the liveness test to confirm |
 
 ---
 
@@ -276,7 +362,7 @@ codex-auth login --device-auth
 
 | Path | Purpose |
 |---|---|
-| `~/.codex/accounts/*.auth.json` (15) | Per-account token snapshots. Filename: `<b64(user-…)>::<b64(uuid)>.auth.json` |
+| `~/.codex/accounts/*.auth.json` (16) | Per-account token snapshots. Filename: `<b64(user-…)>::<b64(uuid)>.auth.json` |
 | `~/.codex/accounts/registry.json` | Index: email, alias, plan, auth_mode, last_used_at, last_usage snapshots. Schema v3. |
 | `~/.codex/accounts/auth.json.bak.<ts>` | Rotation snapshots written by `codex-auth` on every overwrite. |
 | `~/.codex/accounts/registry.json.bak.<ts>` | Registry rotation snapshots. |
@@ -284,6 +370,7 @@ codex-auth login --device-auth
 | `~/.codex/config.toml` | Codex CLI config. |
 | `~/.codex/accounts/login-*-0/` | Live login session scratch dirs. |
 | `~/.codex/accounts.backup.20260606-234353/` | One-shot snapshot before the 15th-account import. |
+| `~/.codex/accounts.backup.20260607-000814/` | One-shot snapshot before the 16th-account import. |
 | `/usr/lib/node_modules/@loongphy/codex-auth/` | CLI package (npm). |
 | `/usr/lib/node_modules/@loongphy/codex-auth-linux-x64/bin/codex-auth` | Native binary, ELF x86-64, debug symbols present, not stripped. |
 | `/usr/bin/codex-auth` | Symlink to the npm shim. |
@@ -296,3 +383,142 @@ codex-auth login --device-auth
 - **Backup the accounts dir before any import or `switch`.** The CLI rotates automatically (`auth.json.bak.<ts>`), but a one-shot external `cp -a` is cheap insurance and rolls back cleanly.
 - **Cleanup `/tmp` staging files** with `shred -u`, not just `rm` — JWTs are bearer tokens, and `/tmp` is often world-readable on shared systems.
 - **Cloudflare-gated endpoints** (`accounts/check/v4-2023-04-27`) cannot be queried from a CLI. Even with a valid token, the response is a JS challenge. Team-name refresh is browser-only.
+- **Web-session bootstrap is a different shape than CPA.** `accessToken` (camelCase) + JWE `sessionToken` + `user`/`account` blocks, **no `refresh_token`**. Treat it as a 3-month TTL snapshot. If a rotatable long-lived account is needed for the same email, re-auth via `codex-auth login --device-auth`.
+- **`--cpa` validates `refresh_token` upfront.** A web-session blob fails with `MissingRefreshToken` before any conversion. Don't fight it — switch to the manual write path.
+- **`--purge` reads `email` from `tokens.id_token`.** The web-session's only JWT is the `accessToken`, which puts email under the namespaced `https://api.openai.com/profile.email` claim. Construct a synthetic `id_token` (real header + payload with standard `email` + random signature) — the tool decodes for display, not verifies.
+- **Synthetic `id_token` works today, but watch for verification.** If a future `codex-auth` release verifies the JWT signature, web-session imports will break and need a real OAuth round-trip to fix.
+- **Use `agent-browser` for deeper validation** (not yet done in this session): load `https://chatgpt.com` with the `accessToken` pre-set as `Authorization: Bearer …` via CDP `page.setExtraHTTPHeaders`, or set the `__Secure-next-auth.session-token` cookie with the JWE `sessionToken`. Confirms full web UI works, not just the API. Useful when the 3-month window is critical.
+
+---
+
+## 10. Second Import Case: Web-Session Bootstrap (14 → 16)
+
+A second blob, this time a **ChatGPT web session payload** (the kind of data you see in browser DevTools on `chatgpt.com` when logged in, or in `__remixContext`).
+
+### 10.1 Shape differences from CPA
+
+```json
+{
+  "WARNING_BANNER": "...",
+  "user":      { "id": "user-…", "name": "...", "email": "...", "idp": "auth0", "iat": …, "amr": ["pwd"], "mfa": false },
+  "expires":   "2026-09-03T16:22:36.625Z",
+  "account":   { "id": "18174c1e-…", "planType": "plus", "structure": "personal", … },
+  "accessToken":  "<JWT>",     // camelCase! not "access_token"
+  "authProvider": "openai",
+  "sessionToken": "<JWE>",     // encrypted, not usable as bearer
+  "rumViewTags": { … }
+}
+```
+
+| Field | CPA | Web-session |
+|---|---|---|
+| Access token key | `access_token` (snake) | `accessToken` (camel) |
+| Refresh token | `refresh_token` (real) | **missing** |
+| ID token | `id_token` (real) | **missing** |
+| Session token | n/a | `sessionToken` (JWE, encrypted) |
+| User info | `email` only | `user.{id,name,email,idp,amr,mfa}` |
+| Account info | `account_id` only | `account.{id,planType,…}` |
+| Plan type | from id_token JWT claim | top-level `account.planType` |
+| Expiry | `expired` | `expires` (3 months out) |
+| `idp` | n/a | `auth0` (password AMR, no MFA) |
+
+### 10.2 `--cpa` rejects it
+
+```bash
+codex-auth import --cpa /tmp/codex-import-18174c1e.json
+# ✗ skipped   codex-import-18174c1e: MissingRefreshToken
+# Import Summary: 0 imported, 1 skipped
+```
+
+CPA validates the structure upfront and bails if no `refresh_token` is present.
+
+### 10.3 Manual conversion path
+
+Three steps: (1) compute filename, (2) write file with synthetic `id_token`, (3) `--purge` to register.
+
+**Step 1 — compute filename:**
+
+```bash
+b64u() { printf '%s' "$1" | base64 -w0 | tr '+/' '-_' | tr -d '='; }
+echo "$(b64u 'user-rhkxPDnWRQULhe2IKgOvJrIy')::$(b64u '18174c1e-86ad-4ce8-9217-63126a1bf803').auth.json"
+# → dXNlci1yaGt4UERuV1JRVUxoRTJJS2dPdkpySXk6OjE4MTc0YzFlLTg2YWQtNGNlOC05MjE3LTYzMTI2YTFiZjgwMw.auth.json
+```
+
+**Step 2 — write the file** at the computed path:
+
+```json
+{
+  "auth_mode": "chatgpt",
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token":      "<synthetic JWT, see below>",
+    "access_token":  "<from accessToken>",
+    "refresh_token": "",
+    "account_id":    "<from account.id>"
+  },
+  "last_refresh": "<current RFC3339 timestamp>"
+}
+```
+
+**Step 2a — construct a synthetic `id_token`.** `codex-auth import --purge` reads the `email` claim from `tokens.id_token` to populate the registry. The web-session's only JWT is the `accessToken`, which puts email under the namespaced `https://api.openai.com/profile.email` claim. We need a standard `email` claim at the payload root.
+
+The tool decodes for display, not verifies — so the signature can be random bytes:
+
+```bash
+b64url() { python3 -c "import base64,sys;print(base64.urlsafe_b64encode(sys.stdin.buffer.read()).rstrip(b'=').decode())"; }
+
+HDR=$(printf '%s' '{"alg":"RS256","kid":"19344e65-bbc9-44d1-a9d0-f957b079bd0e","typ":"JWT"}' | b64url)
+PAY=$(printf '%s' '{"at_hash":"bPMtD6sPQ_evLFtIiGrH2Q","aud":["app_X8zY6vW2pQ9tR3dE7nK1jL5gH"],"auth_provider":"openai","auth_time":1780578151,"email":"sean973austin@gmail.com","email_verified":true,"exp":1890987000,"https://api.openai.com/auth":{"chatgpt_account_id":"18174c1e-86ad-4ce8-9217-63126a1bf803","chatgpt_plan_type":"plus","chatgpt_user_id":"user-rhkxPDnWRQULhe2IKgOvJrIy","user_id":"user-rhkxPDnWRQULhe2IKgOvJrIy"},"iat":1780578151,"iss":"https://auth.openai.com","jti":"0b6d2d71-33e1-4e2d-8c14-293e9f4181a4","sid":"78a1ef13-80e6-4876-b529-cdf383e43176","sub":"auth0|a3Qtki3o3878OTqEUoiMABtK"}' | b64url)
+SIG=$(head -c 32 /dev/urandom | b64url)
+ID_TOKEN="${HDR}.${PAY}.${SIG}"
+
+# Inject into the file
+jq --arg t "$ID_TOKEN" '.tokens.id_token = $t' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
+chmod 600 "$FILE"
+```
+
+**Required claims** (based on what `--purge` reads + what the 14 originals have):
+
+- `email` (standard, top-level) — required, drives the registry entry
+- `email_verified`
+- `chatgpt_account_id`, `chatgpt_user_id`, `chatgpt_plan_type` (under `https://api.openai.com/auth`)
+- `iat`, `exp`, `iss`, `aud`, `sub`, `jti`, `sid`
+- `auth_provider`, `auth_time`, `at_hash`
+
+**Step 3 — register:**
+
+```bash
+codex-auth import --purge
+# ✓ imported  dXNlci1yaGt4UERuV1JRVUxoRTJJS2dPdkpySXk6OjE4MTc0YzFlLTg2YWQtNGNlOC05MjE3LTYzMTI2YTFiZjgwMw
+# Registry: 16 accounts
+```
+
+### 10.4 Liveness test
+
+```bash
+TOK=$(jq -r '.tokens.access_token' "$FILE")
+curl -sS -o /tmp/wham.json -w "HTTP %{http_code}\n" \
+  -H "Authorization: Bearer $TOK" -H "Accept: application/json" \
+  "https://chatgpt.com/backend-api/wham/usage"
+# → HTTP 200
+# {"email":"sean973austin@gmail.com","plan_type":"plus",
+#  "rate_limit":{"primary_window":{"used_percent":1,...},
+#                "secondary_window":{"used_percent":0,...}}}
+```
+
+**List output:**
+
+```
+12 sean973austin@gmail.com   Plus   99% (05:15)   100% (00:15 on 14 Jun)   Now
+```
+
+### 10.5 Caveats
+
+- **No `refresh_token`** → token cannot be rotated. `codex-auth` will try to refresh and fail. Account dies when `access_token` JWT `exp` is reached (~3 months from `iat`).
+- **Synthetic `id_token` signature** → tool decodes for display only, not verifies. If the tool is later updated to verify, this import will fail validation and need a real OAuth round-trip to fix.
+- **Server-side revocation still possible** — even with a valid-looking JWT, OpenAI can `token_invalidate` at any time (as seen with the CPA import). Always run the liveness test before relying on the account.
+- **JWE `sessionToken` is unusable for the API** — it's the web app's session cookie, encrypted with a key the client doesn't have. The CLI path (header bearer) is the only viable use of this blob.
+
+### 10.6 Backup
+
+`~/.codex/accounts.backup.20260607-000814/` (28 items, full snapshot before the 16th-account import).
