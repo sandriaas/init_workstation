@@ -1,0 +1,41 @@
+services:
+  runner:
+    image: ubuntu:22.04
+    ports:
+      - "8080:80"
+      - "873:873"
+    environment:
+      - TZ=Asia/Makassar
+      - DEBIAN_FRONTEND=noninteractive
+    volumes:
+      - runner_data:/data
+    command: >
+      sh -c "apt-get update &&
+             apt-get install -y nginx rsync curl &&
+             mkdir -p /data/logs /data/agent-workspaces /data/files /data/backups /data/config /data/www &&
+             echo '<!DOCTYPE html><html><head><title>Runner</title></head><body><h1>Ubuntu Runner - Integration Hub</h1><p>Services: <a href=\"/multica/\">Multica</a> | <a href=\"/hermes/\">Hermes</a> | <a href=\"/paperclip/\">Paperclip</a></p></body></html>' > /data/www/index.html &&
+             test -f /data/nginx.conf && cp /data/nginx.conf /etc/nginx/nginx.conf &&
+             nginx -g 'daemon off;'"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    networks:
+      - dokploy-network
+      - test-hermes-agent-kcna8s_default
+      - test-multica-jxx2iy_default
+      - test-multica-jxx2iy_multica-internal
+
+volumes:
+  runner_data:
+
+networks:
+  dokploy-network:
+    external: true
+  test-hermes-agent-kcna8s_default:
+    external: true
+  test-multica-jxx2iy_default:
+    external: true
+  test-multica-jxx2iy_multica-internal:
+    external: true

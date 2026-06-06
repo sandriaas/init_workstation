@@ -1,0 +1,21 @@
+services:
+  relay:
+    build: .
+    image: chatwoot-dify-relay:latest
+    restart: always
+    env_file:
+      - ./.env
+    expose:
+      - "8085"
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.chatwoot-dify-relay.rule=Host(`chatwoot-hook-rengga-test.easyrentbali.com`)'
+      - 'traefik.http.routers.chatwoot-dify-relay.entrypoints=web'
+      - 'traefik.http.services.chatwoot-dify-relay.loadbalancer.server.port=8085'
+    networks:
+      - default
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true
