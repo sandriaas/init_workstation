@@ -1,7 +1,7 @@
 # Scripts Index
 
-48 bash scripts across 4 categories for diagnosing, fixing, and verifying
-your WSL2 + Zeabur Wonder Mesh setup.
+~60 bash scripts across 8 categories for diagnosing, fixing, verifying,
+and operating your WSL2 + Zeabur Wonder Mesh setup.
 
 > **All scripts must be run from inside WSL2** (not from Windows PowerShell).
 > Mount the `wsl-zeabur/` folder at `/mnt/c/init_workstation/wsl-zeabur` and run
@@ -51,6 +51,75 @@ Mutating scripts that repair known issues.
 | [fix-tailscale.sh](fixes/fix-tailscale.sh) | Apply Tailscale restart-loop fix (one-time) |
 | [persist-tailscale.sh](fixes/persist-tailscale.sh) | Make Tailscale fix survive WSL restarts |
 | [apply-coredns.sh](fixes/apply-coredns.sh) | Re-apply CoreDNS rewrite ConfigMap (after k3s reverts) |
+
+---
+
+## SEI-545 (JetStream + Stream) (4 scripts)
+
+Enable local NATS JetStream and create the KUBEWATCH stream so
+`zeabur-kube-watch` can publish events and user services get env
+vars populated.
+
+| Script | Purpose |
+|--------|---------|
+| [01-enable-nats-jetstream.sh](sei-545/01-enable-nats-jetstream.sh) | Patch NATS ConfigMap to enable JetStream, restart statefulset |
+| [02-create-jetstream-stream.sh](sei-545/02-create-jetstream-stream.sh) | Create the KUBEWATCH stream + zeabur-control-plane consumer |
+| [03-create-stream.js](sei-545/03-create-stream.js) | Node.js helper to create the stream (called by 02) |
+| [04-create-consumer.js](sei-545/04-create-consumer.js) | Node.js helper to create the consumer (called by 02) |
+
+Order of execution:
+```bash
+wsl -d wsl_test_server_001 -- bash -c "bash /mnt/c/init_workstation/wsl-zeabur/scripts/sei-545/01-enable-nats-jetstream.sh"
+wsl -d wsl_test_server_001 -- bash -c "bash /mnt/c/init_workstation/wsl-zeabur/scripts/sei-545/02-create-jetstream-stream.sh"
+```
+
+---
+
+## Domain (4 scripts)
+
+Manage Zeabur-generated domains for user services (and create manual
+Ingress objects as a workaround for the auto-Ingress SEI-545 issue).
+
+| Script | Purpose |
+|--------|---------|
+| [01-add-domain.sh](domain/01-add-domain.sh) | Generate a new Zeabur domain for a service |
+| [02-create-ingress.sh](domain/02-create-ingress.sh) | Manually create a k3s Ingress object (workaround for SEI-545) |
+| [03-delete-domain.sh](domain/03-delete-domain.sh) | Delete a domain (and its Ingress) |
+| [04-list-domains.sh](domain/04-list-domains.sh) | List all domains on a service |
+
+Example:
+```bash
+wsl -d wsl_test_server_001 -- bash -c "
+  bash /mnt/c/init_workstation/wsl-zeabur/scripts/domain/01-add-domain.sh \
+    <SERVICE_ID> <ENV_ID> [--custom example.com]
+"
+```
+
+---
+
+## DNS (2 scripts)
+
+Apply DNS fixes for the cluster (k3s pod resolv.conf + CoreDNS
+forward + nats.zeabur.com rewrite block).
+
+| Script | Purpose |
+|--------|---------|
+| [01-create-pod-resolv-conf.sh](dns/01-create-pod-resolv-conf.sh) | Create `/etc/k3s-pod-resolv.conf` and install k3s drop-in |
+| [02-fix-coredns-forward.sh](dns/02-fix-coredns-forward.sh) | Patch CoreDNS forward directive and add nats.zeabur.com rewrite block |
+
+Note: These are the one-shot versions. For persistence, use
+`/opt/zeabur-fixes/apply-fixes.sh` (installed from
+`persistence/apply-fixes.sh`).
+
+---
+
+## Stalwart (1 script)
+
+Helpers for the Stalwart Mail Server v0.11.8 service.
+
+| Script | Purpose |
+|--------|---------|
+| [01-get-credentials.sh](stalwart/01-get-credentials.sh) | Get the admin password from container logs + service password from settings |
 
 ---
 
@@ -145,7 +214,7 @@ for s in ~/wsl-zeabur/scripts/diagnostics/*.sh; do echo "=== $s ==="; bash "$s";
 
 ## Adding a New Script
 
-1. Pick the right category (diagnostics, fixes, setup, verification)
+1. Pick the right category (diagnostics, fixes, setup, verification, sei-545, domain, dns, stalwart)
 2. Use the conventions above
 3. Add it to this README under the right table
 4. Make sure it's executable: `chmod +x scripts/<category>/<name>.sh`

@@ -1,0 +1,58 @@
+# Example: Manual Ingress for Zeabur User Services
+#
+# When to use this:
+#   - Zeabur domain shows "Provisioning" for too long
+#   - The control plane hasn't created the Ingress object
+#   - You want to access the service before the auto-ingress is ready
+#
+# When NOT to use this:
+#   - Normal operation (Zeabur auto-creates Ingress objects)
+#   - When you've already set up a public domain via Cloudflare/Dokploy
+#
+# How to use:
+#   1. Find the service details from the dashboard or GraphQL:
+#      - service ID: from the URL or service list
+#      - env ID: the environment ID
+#      - service name: in the namespace pattern `service-<id>`
+#   2. Replace the values below
+#   3. Apply: sudo k3s kubectl apply -f user-ingress-example.yaml
+#   4. Verify: sudo k3s kubectl get ingress -A
+#
+# Why this works:
+#   The Zeabur ingress-controller pod (zeabur/ingress-controller:1.2.1) is
+#   a custom controller that watches k8s Ingress objects across ALL
+#   namespaces (not just `default`). It maintains a routing table of
+#   domain -> service:port. When you create an Ingress object with a
+#   host matching the service's domain, the controller picks it up
+#   immediately and starts routing traffic.
+#
+# This was created to work around Zeabur incident SEI-545 where
+# `zeabur-kube-watch` cannot publish events to NATS JetStream (cloud-side
+# issue, "no response from stream"). The control plane never sees the
+# pod's "Running" event, so it never auto-creates the Ingress.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ujj8886tghj8-zeabur-app
+  namespace: environment-6a242c9f95b39806d284aaa7
+  annotations:
+    zeabur.com/auto-generated: "true"
+    zeabur.com/project-id: 6a242c9f2fe98e0879e0f199
+    zeabur.com/service-id: 6a242f96f1be9943f1f972a7
+  labels:
+    zeabur_type: user-service
+    zeabur_service_id: 6a242f96f1be9943f1f972a7
+    zeabur_project_id: 6a242c9f2fe98e0879e0f199
+    zeabur_environment_id: 6a242c9f95b39806d284aaa7
+spec:
+  rules:
+  - host: ujj8886tghj8.zeabur.app
+    http:
+      paths:
+      - backend:
+          service:
+            name: service-6a242f96f1be9943f1f972a7
+            port:
+              number: 8080
+        path: /
+        pathType: Prefix

@@ -16,9 +16,11 @@
 7. [DNS Fix](#dns-fix)
 8. [NATS Configuration](#nats-configuration)
 9. [CoreDNS Rewrite](#coredns-rewrite)
-10. [Verification](#verification)
-11. [Architecture](#architecture)
-12. [References](#references)
+10. [SEI-545 Fix (Local JetStream)](#sei-545-fix-local-jetstream)
+11. [Persistence Layer](#persistence-layer)
+12. [Verification](#verification)
+13. [Architecture](#architecture)
+14. [References](#references)
 
 ---
 
@@ -878,7 +880,138 @@ The `import /etc/coredns/custom/*.server` line in the Corefile will pick up this
 
 ---
 
+## SEI-545 Fix (Local JetStream)
+
+The "no response from stream" / "no responders" errors from
+`zeabur-kube-watch` are caused by the local NATS not having JetStream
+enabled. The fix has three parts:
+
+### 1. Enable JetStream on local NATS
+
+Patches the `nats-config` ConfigMap to add a `jetstream` block, then
+restarts the statefulset (data persists in PVC `nats-data-nats-0`):
+
+```bash
+wsl -d wsl_test_server_001 -- bash -c "
+  bash /mnt/c/init_workstation/wsl-zeabur/scripts/sei-545/01-enable-nats-jetstream.sh
+"
+```
+
+### 2. Create the KUBEWATCH stream and consumer
+
+```bash
+wsl -d wsl_test_server_001 -- bash -c "
+  bash /mnt/c/init_workstation/wsl-zeabur/scripts/sei-545/02-create-jetstream-stream.sh
+"
+```
+
+This creates:
+- Stream `KUBEWATCH` (subjects: `events.>`, `kube.>`, `pods.>`, `events`)
+- Consumer `zeabur-control-plane` (durable, filter `events.>`, explicit ack)
+
+### 3. Verify
+
+```bash
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl logs -n default -l name=zeabur-kube-watch --tail=5
+"
+# Expected: 'service started' with no JetStream errors
+```
+
+After the fix:
+- `zeabur-kube-watch` publishes successfully
+- User service env vars are populated (e.g., `DOMAIN_GENERATED`)
+- Manual `kubectl apply ingress` is no longer required for new services
+- ACME challenges for new domains work (DNS resolves via CoreDNS)
+
+See [docs/troubleshooting.md#7-sei-545](troubleshooting.md#7-sei-545-zeabur-kube-watch-cannot-publish-to-jetstream)
+for the full root cause analysis.
+
+---
+
+## Persistence Layer
+
+After applying all the fixes, they need to survive WSL/k3s restarts.
+The persistence architecture:
+
+```
+WSL boot
+  ↓
+/etc/rc.local (rc-local.service)
+  - start-tailscale.sh (nohup tailscaled)
+  - apply-fixes.sh --early (pod resolv.conf)
+  ↓
+k3s.service
+  - Drop-in adds --resolv-conf /etc/k3s-pod-resolv.conf
+  - ExecStartPost=/opt/zeabur-fixes/apply-fixes.sh
+    ↓
+    1. Wait 5s for CoreDNS manifest mtime to stabilize
+    2. Patch forward . 8.8.8.8 1.0.0.1 8.8.4.4
+    3. Add nats.zeabur.com rewrite block (uses kubernetes plugin)
+    4. Touch manifest to force k3s to redeploy CoreDNS
+    5. Verify NATS JetStream is enabled
+    6. Verify KUBEWATCH stream + consumer exist
+    7. Restart user service deployments (env var re-population)
+    8. Log to /var/log/zeabur-fixes.log
+```
+
+To install the persistence layer:
+
+```bash
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo mkdir -p /opt/zeabur-fixes
+  sudo cp /mnt/c/init_workstation/wsl-zeabur/persistence/apply-fixes.sh /opt/zeabur-fixes/
+  sudo chmod +x /opt/zeabur-fixes/apply-fixes.sh
+  sudo cp /mnt/c/init_workstation/wsl-zeabur/persistence/install-nats-cli.sh /opt/zeabur-fixes/
+  sudo chmod +x /opt/zeabur-fixes/install-nats-cli.sh
+
+  # k3s drop-in
+  sudo mkdir -p /etc/systemd/system/k3s.service.d/
+  sudo cp /mnt/c/init_workstation/wsl-zeabur/persistence/k3s.service.d-override.conf \
+          /etc/systemd/system/k3s.service.d/override.conf
+
+  # WSL boot hook
+  sudo cp /mnt/c/init_workstation/wsl-zeabur/persistence/rc.local /etc/rc.local
+  sudo chmod +x /etc/rc.local
+
+  sudo systemctl daemon-reload
+  sudo /opt/zeabur-fixes/apply-fixes.sh
+
+  # Install nats CLI
+  sudo /opt/zeabur-fixes/install-nats-cli.sh
+"
+```
+
+To test (restart k3s and verify):
+
+```bash
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo systemctl restart k3s
+  sleep 60
+  sudo tail -50 /var/log/zeabur-fixes.log
+  sudo /usr/local/bin/kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' | grep -E 'forward|rewrite'
+"
+```
+
+Expected output includes:
+- `forward . 8.8.8.8 1.0.0.1 8.8.4.4`
+- `rewrite name exact nats.zeabur.com nats.default.svc.cluster.local`
+
+See [persistence.md](persistence.md) for the full architecture.
+
+---
+
 ## Changelog
+
+### 2026-06-07 - SEI-545 Fix + Persistence Layer + HTTPS
+- Enabled NATS JetStream, created KUBEWATCH stream + consumer
+- Created manual Ingress `yjhkbkjb-zeabur-app`, ACME cert obtained
+- HTTPS verified for `https://yjhkbkjb.zeabur.app/api`
+- DNS fix: created `/etc/k3s-pod-resolv.conf` with cluster DNS
+- CoreDNS forward fix: `forward . 8.8.8.8 1.0.0.1 8.8.4.4`
+- nats.zeabur.com rewrite block using `kubernetes` plugin
+- Persistence layer: k3s drop-in + apply-fixes.sh + rc.local
+- All fixes tested across 2x k3s restarts
 
 ### 2026-06-07 - Tailscale Stability + CoreDNS Persistence
 - Diagnosed Tailscale restart loop (SIGTERM from WSL2 init)

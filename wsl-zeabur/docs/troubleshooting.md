@@ -10,16 +10,18 @@ with root cause analysis, detection, and fixes.
 1. [Server Shows "Offline" in Dashboard](#1-server-shows-offline-in-dashboard)
 2. [Tailscale Restart Loop (SIGTERM)](#2-tailscale-restart-loop-sigterm)
 3. [Image Pull DNS Resolution Failure](#3-image-pull-dns-resolution-failure)
-4. [CoreDNS Rewrite Reverts](#4-coredns-rewrite-reverts)
+4. [CoreDNS Forward and Rewrite Reverts](#4-coredns-forward-and-rewrite-reverts)
 5. [zeabur-kube-watch CrashLoopBackOff](#5-zeabur-kube-watch-crashloopbackoff)
 6. [NATS Authentication Error 503](#6-nats-authentication-error-503)
-7. [JetStream "no response from stream"](#7-jetstream-no-response-from-stream)
+7. [SEI-545: zeabur-kube-watch Cannot Publish to JetStream](#7-sei-545-zeabur-kube-watch-cannot-publish-to-jetstream)
 8. [Zeabur API Returns "No such server"](#8-zeabur-api-returns-no-such-server)
 9. [Wonder Mesh Gateway Cannot Reach Peer](#9-wonder-mesh-gateway-cannot-reach-peer)
 10. [Container Sandbox Failure: flannel subnet.env](#10-container-sandbox-failure-flannel-subnetenv)
 11. [ImagePullBackOff Due to QPS Limit](#11-imagepullbackoff-due-to-qps-limit)
 12. [WSL2 Resource Limits](#12-wsl2-resource-limits)
 13. [System Has Multiple init Processes](#13-system-has-multiple-init-processes)
+14. [Stalwart "No WebAdmin" / 404 on /admin](#14-stalwart-no-webadmin--404-on-admin)
+15. [Fixes Don't Persist Across WSL/k3s Restart](#15-fixes-dont-persist-across-wslk3s-restart)
 
 ---
 
@@ -250,54 +252,114 @@ sudo k3s kubectl run dnstest --rm -i --image=busybox --restart=Never -- nslookup
 
 ---
 
-## 4. CoreDNS Rewrite Reverts
+## 4. CoreDNS Forward and Rewrite Reverts
 
 ### Symptoms
-- You add the rewrite: `rewrite name regex nats\.zeabur\.com nats.default.svc.cluster.local`
+- You add `rewrite name regex nats\.zeabur\.com nats.default.svc.cluster.local`
+  to the Corefile
 - `kubectl get cm coredns -n kube-system -o jsonpath='{.data.Corefile}'` shows the rewrite
 - But pods still fail with `dial tcp: lookup nats.zeabur.com: i/o timeout`
-- `kubectl.kubernetes.io/last-applied-configuration` annotation has the rewrite, but the live config doesn't
+- After `systemctl restart k3s`, public DNS resolution also fails (pod name lookups like
+  `api.zeabur.com` time out)
 
 ### Detection
 
 ```bash
-sudo k3s kubectl get cm coredns -n kube-system -o jsonpath='{.data.Corefile}' | grep rewrite
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' | grep -E 'forward|rewrite'
+"
 ```
 
-If empty, the rewrite is missing from the live config.
+If the output is empty or only shows `forward . /etc/resolv.conf`, the fix is missing.
 
-### Root Cause
-K3s manages the CoreDNS ConfigMap via an Addon (Helm-style). When k3s restarts
-the CoreDNS pod, it **re-applies the addon template** which **overwrites your
+### Root Cause (Two Issues)
+K3s manages the CoreDNS ConfigMap via an Addon (Helm-style). When k3s starts,
+the **addon manager writes the bundled template** to
+`/var/lib/rancher/k3s/server/manifests/coredns.yaml`, which **overwrites your
 changes** to the ConfigMap.
 
-### Fix (Two Options)
+Two specific configurations revert:
+1. **`forward . 8.8.8.8 1.0.0.1 8.8.4.4`** (in the `.:53` block) - needed for
+   public DNS resolution (ACME challenges, image pulls, etc.)
+2. **Rewrite block `nats.zeabur.com:53 { rewrite name exact ... }`** - needed
+   for Zeabur internal service discovery
 
-**Option A: Re-apply after every k3s restart (manual)**
+### Fix (Permanent, Idempotent)
+
+Use `/opt/zeabur-fixes/apply-fixes.sh` to re-apply both on every k3s start.
+The script runs as `ExecStartPost` in
+`/etc/systemd/system/k3s.service.d/override.conf` (k3s drop-in unit).
+
+See:
+- [scripts/dns/02-fix-coredns-forward.sh](../scripts/dns/02-fix-coredns-forward.sh) - one-shot fix
+- [persistence/apply-fixes.sh](../persistence/apply-fixes.sh) - persistent fix
+- [docs/persistence.md](persistence.md) - how the persistence works
 
 ```bash
-sudo k3s kubectl apply -f wsl-zeabur/config/k3s/coredns-configmap.yaml
-sudo k3s kubectl rollout restart deployment coredns -n kube-system
+# Apply the persistent fix
+wsl -d wsl_test_server_001 -- bash -c "sudo /opt/zeabur-fixes/apply-fixes.sh"
+
+# Verify
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' | grep -E 'forward|rewrite'
+"
+# Expected:
+#   forward . 8.8.8.8 1.0.0.1 8.8.4.4
+#   rewrite name exact nats.zeabur.com nats.default.svc.cluster.local
+#   ...
 ```
 
-**Option B: Use k3s auto-deploy manifests (permanent)**
+### Why the rewrite block uses `kubernetes` (not `forward`)
 
-Place the file at `/var/lib/rancher/k3s/server/manifests/` and k3s will deploy it
-on every startup:
+Early attempts failed:
+- `forward . 8.8.8.8` in the rewrite block → 8.8.8.8 doesn't know about
+  `*.svc.cluster.local`, returns NXDOMAIN
+- `forward . /etc/resolv.conf` in the rewrite block → loops back to
+  CoreDNS itself (now that `/etc/k3s-pod-resolv.conf` points to CoreDNS)
 
-```bash
-sudo mkdir -p /var/lib/rancher/k3s/server/manifests/
-sudo cp wsl-zeabur/config/k3s/coredns-rewrite-autodeploy.yaml /var/lib/rancher/k3s/server/manifests/
+**Correct approach** uses the `kubernetes` plugin which queries the
+Kubernetes API for service discovery:
+
+```toml
+nats.zeabur.com:53 {
+    errors
+    cache 30
+    rewrite name exact nats.zeabur.com nats.default.svc.cluster.local
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+        pods insecure
+        fallthrough in-addr.arpa ip6.arpa
+    }
+}
 ```
 
-The `import /etc/coredns/custom/*.server` line in the Corefile will pick this up.
+### Why k3s manifest edits are needed (not just ConfigMap patches)
+
+If you only `kubectl apply` a patched ConfigMap, k3s's addon manager will
+revert it on the next start. The bundled manifest at
+`/var/lib/rancher/k3s/server/manifests/coredns.yaml` is the source of truth.
+
+The apply-fixes.sh script:
+1. Waits 5 seconds for the manifest mtime to stabilize (k3s addon manager
+   writes the bundled manifest within ~1s of startup)
+2. Edits the manifest directly (so k3s auto-redeploys when it sees the mtime change)
+3. Touches the manifest after editing (to force a redeploy)
 
 ### Verification
 
 ```bash
 # From inside a pod
-sudo k3s kubectl run dnstest --rm -i --image=busybox --restart=Never -- nslookup nats.zeabur.com
-# Should resolve to nats.default.svc.cluster.local
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl run dnstest --image=alpine --restart=Never --command -- sleep 60
+  sleep 5
+  sudo /usr/local/bin/kubectl exec dnstest -- nslookup nats.zeabur.com 10.43.0.10
+"
+# Expected: Name: nats.zeabur.com, Address: 10.43.10.121
+
+# Public DNS
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl exec dnstest -- nslookup api.zeabur.com 10.43.0.10
+"
+# Expected: Non-authoritative answer with Cloudflare IPs
 ```
 
 ---
@@ -363,31 +425,99 @@ The new config removes the `authorization` block, so NATS accepts all connection
 
 ---
 
-## 7. JetStream "no response from stream"
+## 7. SEI-545: zeabur-kube-watch Cannot Publish to JetStream
 
 ### Symptoms
-- `zeabur-kube-watch` pod is `1/1 Running` (not crashing)
-- Logs show: `nats: no response from stream` repeated many times
-- Pod keeps restarting (or restart count is high but status is Running)
+- `zeabur-kube-watch` pod is `1/1 Running` (not crashing) but logs show:
+  - `nats: no response from stream`
+  - `pods.> : no responders` / `events.> : no responders`
+- Zeabur user service pods never get `DOMAIN_GENERATED` env vars populated
+- No automatic Ingress is created for user service domains
+- Manual `kubectl apply ingress` is required as workaround
+- Public ACME challenges fail because the ingress-controller can't resolve
+  `nats.zeabur.com` to publish cert requests
 
 ### Detection
 
 ```bash
-sudo k3s kubectl logs -l name=zeabur-kube-watch -n default --tail=50 | grep -c "no response from stream"
+# Check kube-watch logs
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl logs -n default -l name=zeabur-kube-watch --tail=20
+"
+
+# Check if NATS has JetStream enabled
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl -n default exec nats-0 -- cat /etc/nats-config/nats.conf
+" 2>&1 | grep -E "jetstream|store_dir"
+
+# Check streams on NATS
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl -n default exec nats-0 -- \
+    /bin/sh -c 'wget -qO- http://localhost:8222/jsz?streams=true | head -100'
+"
 ```
 
 ### Root Cause
-**Known Zeabur incident (SEI-545)**: The shared NATS JetStream account used by
-`zeabur-kube-watch` has hit the upstream stream limit. This is **NOT a user-fixable
-issue** - it's on Zeabur's side.
+This is **NOT the same as the original "shared upstream limit" issue**. The
+local NATS server in the k3s cluster runs **without JetStream enabled** by
+default. When `zeabur-kube-watch` tries to publish to JetStream streams
+(`pods.>`, `events.>`, `kube.>`), the streams don't exist, so publishing
+fails with "no response from stream". Without those events flowing, the
+Zeabur control plane can't populate the deployment env vars needed to
+auto-create Ingress objects.
 
-### Status
-The pod stays `Running` and continues to work, just with errors logged. These
-errors are non-critical and will resolve automatically when Zeabur fixes the
-upstream issue.
+### Fix (Permanent)
 
-### Workaround
-None needed - the dashboard will auto-recover. See [Zeabur forum thread](https://zeabur.com/forum/posts/6a004af6c0bbffb242e69776).
+Enable JetStream on the local NATS, create the streams kube-watch needs,
+and create a durable consumer for the Zeabur backend.
+
+See the full script set in [scripts/sei-545/](../scripts/sei-545/):
+
+```bash
+# 1. Enable JetStream
+wsl -d wsl_test_server_001 -- bash scripts/sei-545/01-enable-nats-jetstream.sh
+
+# 2. Create the KUBEWATCH stream
+wsl -d wsl_test_server_001 -- bash scripts/sei-545/02-create-jetstream-stream.sh
+```
+
+The first script:
+- Patches the `nats-config` ConfigMap to add a `jetstream { store_dir: ... }` block
+- Restarts the `nats-0` statefulset (data persists in PVC `nats-data-nats-0`)
+- Waits for JetStream to be enabled
+
+The second script creates:
+- Stream `KUBEWATCH` with subjects `events.>`, `kube.>`, `pods.>`, `events`
+- Consumer `zeabur-control-plane` (durable, filter `events.>`, explicit ack)
+
+### Verification
+
+```bash
+# Kube-watch should now publish successfully
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl logs -n default -l name=zeabur-kube-watch --tail=10
+"
+# Should show: 'service started' with no 'no response from stream' errors
+
+# Check stream health
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl -n default exec nats-0 -- \
+    wget -qO- 'http://localhost:8222/jsz?streams=true' | jq '.account_details[0].stream_detail'
+"
+
+# Stream should show messages = "0" (no events yet), state = "active"
+```
+
+### Why not just wait for Zeabur's fix?
+The "no response from stream" was previously blamed on the upstream
+shared account limit. But once you have a local NATS with JetStream
+enabled, the local NATS handles all the events and the shared upstream
+isn't involved. The fix is on the local cluster, not waiting for Zeabur.
+
+### Long-term
+Once the user-service auto-Ingress pipeline works via the local
+JetStream, the manual `kubectl apply ingress` workaround is no longer
+required for new services.
 
 ---
 
@@ -561,6 +691,163 @@ Tailscale restart loop (see #2).
 ### Workaround
 None - this is a WSL2 design decision. The workaround is to use detached
 processes (nohup) instead of systemd services for long-running daemons.
+
+---
+
+## 14. Stalwart "No WebAdmin" / 404 on /admin
+
+### Symptoms
+- Browsing to `https://<domain>/admin` or `/admin/login` returns 404
+- No login form, no error page — just an HTTP 404
+- Stalwart log shows only `webadmin` mentioned as a separate update endpoint
+- The management endpoints at `/api/*` DO work (with auth)
+
+### Detection
+
+```bash
+# All these return 404
+curl -I https://yjhkbkjb.zeabur.app/admin
+curl -I https://yjhkbkjb.zeabur.app/admin/login
+curl -I https://yjhkbkjb.zeabur.app/account
+
+# But the API works
+curl -I -u admin:biqEbPXFxB https://yjhkbkjb.zeabur.app/api/settings/keys
+# Expected: HTTP/1.1 200 OK with JSON
+```
+
+### Root Cause
+**Stalwart v0.11.8 (and earlier) does NOT bundle the WebAdmin static assets
+in the Docker image.** The WebAdmin is a separate download managed via the
+`/api/update/webadmin` management endpoint. By default the image only
+includes the server, JMAP, and management API.
+
+### Fix (Two Options)
+
+**Option A: Trigger WebAdmin download (one-time)**
+
+```bash
+curl -u admin:biqEbPXFxB "https://yjhkbkjb.zeabur.app/api/update/webadmin"
+# Returns: "{\"data\":\"WebAdmin update has been triggered.\"}"
+# After ~30s the /admin and /account paths return 200
+```
+
+**Option B: Use the REST API directly**
+
+All management is done via `/api/*` (HTTP Basic auth). See
+[data/stalwart-reference.md](../data/stalwart-reference.md) for the full
+list of endpoints.
+
+### Verification
+
+```bash
+# List all settings via the API
+curl -s -u admin:biqEbPXFxB \
+    "https://yjhkbkjb.zeabur.app/api/settings/keys" | jq .
+
+# Expected: {"data":{...}} with all server settings
+```
+
+### Caveat for v0.11.x
+
+In v0.11.x, the config schema requires every listener to define its
+protocol explicitly. The 1.0+ release changed this to a more permissive
+default.
+
+---
+
+## 15. Fixes Don't Persist Across WSL/k3s Restart
+
+### Symptoms
+- After `systemctl restart k3s` or WSL reboot:
+  - Pods can't resolve `nats.zeabur.com` again
+  - `zeabur-kube-watch` starts throwing "no response from stream"
+  - Public DNS resolution from pods times out
+  - User service env vars are not populated
+  - Manual Ingress is required for any new service
+
+### Detection
+
+```bash
+# Check k3s service unit has the drop-in
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo systemctl cat k3s.service | grep -A 5 'override'
+"
+# Expected: shows /etc/systemd/system/k3s.service.d/override.conf with
+#   --resolv-conf /etc/k3s-pod-resolv.conf
+#   ExecStartPost=/opt/zeabur-fixes/apply-fixes.sh
+
+# Check apply-fixes.sh ran on last k3s start
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo tail -50 /var/log/zeabur-fixes.log
+"
+# Expected: Last entry timestamp matches k3s restart time
+```
+
+### Root Cause
+WSL2 does not persist Linux filesystem state across Windows reboots
+in a deterministic way. Also, k3s and other services have their own
+initialization order issues:
+
+1. k3s addon manager writes bundled CoreDNS manifest at startup
+   (overwriting manual ConfigMap edits)
+2. WSL `/etc/resolv.conf` is regenerated by WSL launcher unless
+   `generateResolvConf = false` in `wsl.conf`
+3. NATS JetStream config and streams need to be re-applied if the
+   data volume is reset (rare, but possible)
+4. Tailscale restarts in a loop under WSL2 (covered in #2)
+
+### Fix (Permanent)
+
+See [docs/persistence.md](persistence.md) for the full architecture.
+
+Quick install:
+
+```bash
+# Copy persistence files to WSL
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo mkdir -p /opt/zeabur-fixes
+  sudo cp /mnt/c/init_workstation/wsl-zeabur/persistence/apply-fixes.sh /opt/zeabur-fixes/
+  sudo chmod +x /opt/zeabur-fixes/apply-fixes.sh
+
+  # Install the k3s drop-in
+  sudo mkdir -p /etc/systemd/system/k3s.service.d/
+  sudo cp /mnt/c/init_workstation/wsl-zeabur/persistence/k3s.service.d-override.conf \
+          /etc/systemd/system/k3s.service.d/override.conf
+  sudo systemctl daemon-reload
+
+  # Install the WSL boot hook
+  sudo cp /mnt/c/init_workstation/wsl-zeabur/persistence/rc.local /etc/rc.local
+  sudo chmod +x /etc/rc.local
+"
+
+# Restart k3s to test
+wsl -d wsl_test_server_001 -- bash -c "sudo systemctl restart k3s"
+sleep 60
+
+# Verify all fixes are applied
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /usr/local/bin/kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' | grep -E 'forward|rewrite'
+  sudo /usr/local/bin/kubectl -n default get pod -l name=zeabur-kube-watch
+"
+```
+
+### What apply-fixes.sh does (in order)
+
+1. Waits for `/var/lib/rancher/k3s/server/manifests/coredns.yaml` to
+   stabilize (5s no mtime change)
+2. Patches `forward . 8.8.8.8 1.0.0.1 8.8.4.4` into the `.:53` block
+3. Adds the `nats.zeabur.com:53` server block with rewrite + kubernetes
+4. Touches the manifest to force k3s to redeploy CoreDNS
+5. Verifies NATS JetStream is enabled; enables if not
+6. Verifies stream `KUBEWATCH` and consumer `zeabur-control-plane` exist
+7. Restarts any user service deployments to re-trigger env-var population
+8. Logs everything to `/var/log/zeabur-fixes.log`
+
+### Why a drop-in (not direct edit)?
+
+k3s may rewrite `/etc/systemd/system/k3s.service` during package upgrades.
+A drop-in at `/etc/systemd/system/k3s.service.d/override.conf` is loaded
+**after** the main unit and survives main unit rewrites.
 
 ---
 
