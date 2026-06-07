@@ -35,7 +35,7 @@ isolation is in `kubelet` config. Tracked separately.
 
 | Pod | Ready | Status | Restarts | Age | IP | Node |
 |-----|-------|--------|----------|-----|----|------|
-| service-6a242f96f1be9943f1f972a7-84d48c4859-dfjvc | 1/1 | Running | 0 | 91m | 10.42.0.55 | 100.64.3.1 |
+| service-6a242f96f1be9943f1f972a7-84d48c4859-dfjvc | 1/1 | Running | 0 | 118m | 10.42.0.55 | 100.64.3.1 |
 
 Stalwart Mail Server v0.11.8. Image: `stalwartlabs/mail-server:v0.11.8`.
 HTTP listener on :8080 (NodePort 32247).
