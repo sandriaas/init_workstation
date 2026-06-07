@@ -25,6 +25,7 @@ with root cause analysis, detection, and fixes.
 16. [Zeabur-Generated Domain Not Publicly Accessible](#16-zeabur-generated-domain-not-publicly-accessible)
 17. [Sub-Subdomain Wildcard SSL Fails on Cloudflare Free](#17-sub-subdomain-wildcard-ssl-fails-on-cloudflare-free)
 18. [KUBEWATCH Consumer Filter `events.>` Matches Nothing](#18-kubewatch-consumer-filter-events-matches-nothing)
+19. [Public URL Returns 530/502 Every k3s Restart](#19-public-url-returns-530502-every-k3s-restart)
 
 ---
 
@@ -1078,6 +1079,90 @@ The consumer is durable and persists across k3s restarts. But if the
 NATS StatefulSet's PVC is wiped, the consumer is recreated from
 `apply-fixes.sh` — and the legacy script had the wrong filter. The new
 script handles both cases.
+
+---
+
+## 19. Public URL Returns 530/502 Every k3s Restart
+
+### Symptoms
+
+- `https://<service>.cfworkers.dpdns.org` returns `HTTP 530` (cloudflared:
+  "no more connections active") or `HTTP 502` (cloudflared: "bad gateway")
+  for ~30 seconds after every k3s restart, then recovers.
+- `kubectl get pod -n default -l app.kubernetes.io/name=ingress-controller`
+  shows frequent `RESTARTS` increments (one per k3s start).
+- `/var/log/zeabur-fixes.log` shows lines like
+  `restarted ds/ingress-controller (via pod delete)` on every run.
+
+### Root Cause
+
+`apply-fixes.sh` (the idempotent fix-up script that runs on every k3s
+start via `k3s.service`'s `ExecStartPost`) used to **unconditionally delete
+the ingress-controller pod** so it would re-mount the new
+`/etc/k3s-pod-resolv.conf`. But the resolv.conf is created and made
+immutable on the first run, so every subsequent run was deleting a pod
+that was already running with the correct resolv.conf, just to "be safe".
+
+This caused:
+
+1. **Direct downtime**: the ingress-controller takes 5-10 seconds to
+   become Ready after a pod delete. During that window the public URL
+   returns 530/502.
+2. **Race condition**: when k3s restarted twice in a row (common on WSL2
+   with Modern Standby), systemd fired two `ExecStartPost` hooks
+   back-to-back. The first script would create the resolv.conf, mark
+   the marker file, and start the restart. The second script would
+   see the marker (or be racing with the first), and trigger a *second*
+   pod delete, compounding the downtime.
+
+### Fix
+
+Two changes in `persistence/apply-fixes.sh`:
+
+1. **Skip the restart on subsequent runs** (commit `a3b33b3`). Track
+   whether `/etc/k3s-pod-resolv.conf` was newly created in this run via
+   a marker file at `/var/run/zeabur-fixes-resolv-created`. The
+   `[G]` step only restarts workloads if the marker is present, i.e.
+   only on the first run after the resolv.conf was created. On every
+   subsequent k3s start the script logs:
+
+   ```
+   [G] SKIP: resolv.conf was already in place at start; no restart needed
+   ```
+
+2. **Acquire an exclusive lock at startup** (same commit). `mkdir(1)` is
+   atomic on POSIX, so we use `/var/run/zeabur-fixes.lock` as a mutex.
+   The second of two concurrent runs exits immediately:
+
+   ```
+   ==== apply-fixes.sh SKIP: another instance holds the lock ====
+   ```
+
+### Verification
+
+After deploying the fix, run the public URL test:
+
+```bash
+for i in 1 2 3 4 5; do
+  curl -sk -o /dev/null -w "%{http_code}\n" \
+    https://stalwart.cfworkers.dpdns.org/admin
+  sleep 5
+done
+```
+
+Expected: 4-5 out of 5 return `302` (or `200`), and any failures are
+limited to the first ~15 seconds (cloudflared reconnect window). Before
+the fix, the success rate was 0-1 out of 5 because every k3s restart
+triggered an ingress-controller restart.
+
+### Why not just not run apply-fixes.sh at all?
+
+`apply-fixes.sh` is idempotent — it only changes things that are
+*missing* or *wrong*. Skipping it would mean losing the
+CoreDNS forward, the NATS JetStream stream, the KUBEWATCH consumer, the
+public Ingress, etc. when k3s restarts and reverts those settings. The
+lock + marker approach keeps all those fixes but stops the gratuitous
+ingress-controller restarts.
 
 ---
 
