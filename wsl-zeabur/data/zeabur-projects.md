@@ -26,17 +26,27 @@ npx -y zeabur@latest project list --workspace personal --json
 - **Project ID:** `6a242c9f2fe98e0879e0f199`
 - **Environment:** `6a242c9f95b39806d284aaa7` (production)
 - **Service:** `6a242f96f1be9943f1f972a7` (stalwart, template: PREBUILT_V2)
-- **Service password:** `k29C30HlVF7I4LaAD5Y6wviNKT8PGx1u`
-- **Image:** `stalwartlabs/mail-server:v0.11.8`
+- **Image:** `stalwartlabs/mail-server:v0.16.8` (auto-upgraded from v0.11.8)
+- **Mode:** BOOTSTRAP (WebUI at `/admin`)
+- **Service password (admin):** `5H1JEjoQAJS5kSaZ`
 - **Port mapping:** web:8080 (NodePort 32247)
-- **Domain (current):** `yjhkbkjb.zeabur.app`
-  - Domain ID: `6a2469b70d6e0588145e564e`
-  - Status: ACTIVE
+- **PUBLIC URL (works from any device):** `https://stalwart.cfworkers.dpdns.org`
+  - Routed via Cloudflare Tunnel `wsl-fx506-stalwart` (id `d1534e02-b697-4e99-bb0d-cf04c79199a9`)
+  - DNS: wildcard CNAME `*.cfworkers.dpdns.org` → tunnel
+  - Ingress: `stalwart-cfworkers` in namespace `environment-6a242c9f95b39806d284aaa7`
+  - Created/maintained by `scripts/domain/02-expose-service.sh` and `persistence/apply-fixes.sh`
+- **Domain (Zeabur-generated, NOT publicly accessible):** `stalwart-2932989.zeabur.app`
+  - Domain ID: `6a24d3010d6e0588145e56c8`
+  - Status: PROVISIONING
   - Created: 2026-06-07
-  - isGenerated: true (Zeabur-generated domain)
-- **Domain (deleted):** `ujj8886tghj8.zeabur.app`
-  - Was resolving to 52.223.32.133 (AWS CloudFront) when public
-  - Was used while ingress-controller was failing for ACME challenges
+  - isGenerated: true
+  - DNS: `100.64.3.1` (Tailscale) — only reachable from Tailscale mesh devices
+  - **Do not use this for public access.** Public access goes through Cloudflare Tunnel.
+- **Custom domains (added via dashboard, but not publicly routable):**
+  - `stalwart-234924.zbwm-001.cfworkers.dpdns.org` (id `6a24e6df0d6e0588145e56e9`, status PROVISIONING, created 2026-06-07)
+  - `stalwart-zbwm-001.cfworkers.dpdns.org` (id `6a24e9c40d6e0588145e56f4`, status PROVISIONED, created 2026-06-07)
+  - These were attempts at sub-subdomain wildcards (`*.zbwm-001.cfworkers.dpdns.org`) which fail because Cloudflare Universal SSL only covers one-level wildcards on the Free plan. The working pattern is the one-level wildcard `*.cfworkers.dpdns.org`.
+- **Domain (deleted):** `yjhkbkjb.zeabur.app`, `ujj8886tghj8.zeabur.app`
 
 ## Server
 

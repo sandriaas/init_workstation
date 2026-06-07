@@ -22,6 +22,9 @@ with root cause analysis, detection, and fixes.
 13. [System Has Multiple init Processes](#13-system-has-multiple-init-processes)
 14. [Stalwart "No WebAdmin" / 404 on /admin](#14-stalwart-no-webadmin--404-on-admin)
 15. [Fixes Don't Persist Across WSL/k3s Restart](#15-fixes-dont-persist-across-wslk3s-restart)
+16. [Zeabur-Generated Domain Not Publicly Accessible](#16-zeabur-generated-domain-not-publicly-accessible)
+17. [Sub-Subdomain Wildcard SSL Fails on Cloudflare Free](#17-sub-subdomain-wildcard-ssl-fails-on-cloudflare-free)
+18. [KUBEWATCH Consumer Filter `events.>` Matches Nothing](#18-kubewatch-consumer-filter-events-matches-nothing)
 
 ---
 
@@ -840,14 +843,241 @@ wsl -d wsl_test_server_001 -- bash -c "
 4. Touches the manifest to force k3s to redeploy CoreDNS
 5. Verifies NATS JetStream is enabled; enables if not
 6. Verifies stream `KUBEWATCH` and consumer `zeabur-control-plane` exist
-7. Restarts any user service deployments to re-trigger env-var population
-8. Logs everything to `/var/log/zeabur-fixes.log`
+   with the **correct filter `>`** (recreates if filter is wrong)
+7. Re-creates any `PUBLIC_EXPOSURES` Ingresses (Cloudflare Tunnel pattern)
+8. Restarts workloads to pick up the new resolv.conf
+9. Logs everything to `/var/log/zeabur-fixes.log`
 
 ### Why a drop-in (not direct edit)?
 
 k3s may rewrite `/etc/systemd/system/k3s.service` during package upgrades.
 A drop-in at `/etc/systemd/system/k3s.service.d/override.conf` is loaded
 **after** the main unit and survives main unit rewrites.
+
+---
+
+## 16. Zeabur-Generated Domain Not Publicly Accessible
+
+### Symptoms
+
+- `curl https://<service>-<id>.zeabur.app/` times out from any device NOT on Tailscale
+- `dig <service>-<id>.zeabur.app` returns `100.64.3.1` (Tailscale IP)
+- ACME challenges fail (HTTP-01 never reaches WSL)
+- Dashboard shows domain as `PROVISIONING` forever
+
+### Detection
+
+```bash
+# From any device, look up the auto-generated domain
+nslookup stalwart-2932989.zeabur.app
+# Server:  dns.google
+# Address:  8.8.8.8
+#
+# Non-authoritative answer:
+# Name:    stalwart-2932989.zeabur.app
+# Address:  100.64.3.1   <-- Tailscale IP, NOT publicly routable
+
+# The wildcard *.zeabur.app points to AWS Global Accelerator
+dig +short zeabur.app
+# 52.223.32.133
+
+# But the per-service subdomain is a CNAME to a Tailscale-only IP
+dig +short stalwart-2932989.zeabur.app
+# 100.64.3.1
+```
+
+### Root Cause
+
+Two issues, both architectural in Zeabur's WSL setup:
+
+1. **Per-service subdomains CNAME to Tailscale IP** (`100.64.3.1`):
+   Only devices on the Tailscale mesh (including Zeabur's gateway at
+   `100.64.0.1`) can reach the WSL. This is by design — Zeabur uses
+   Tailscale for control plane communication, but it inadvertently makes
+   the public domain also Tailscale-only.
+2. **Wildcard `*.zeabur.app` points to AWS Global Accelerator**:
+   `52.223.32.133` is an anycast IP that should route to Zeabur's edge.
+   But the per-service subdomain overrides the wildcard with a CNAME to
+   the Tailscale IP, so the public edge never sees requests for that
+   subdomain.
+3. **WSL public IP is behind a home router**: `182.253.129.75` (BIZNET,
+   Bali) port 443 is not port-forwarded. So even if the CNAME pointed
+   there, it wouldn't work.
+
+### Fix (Use Cloudflare Tunnel)
+
+We add a parallel public exposure via Cloudflare Tunnel. See
+[setup-walkthrough.md Step 11](setup-walkthrough.md#step-11-expose-a-service-to-the-public-internet)
+for full setup. Short version:
+
+```bash
+# 1. Install cloudflared
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared noble main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt update && sudo apt install -y cloudflared
+
+# 2. Place credentials (chmod 600) and config at /etc/cloudflared/
+
+# 3. Enable the systemd service (see config/systemd/cloudflared.service)
+sudo systemctl enable --now cloudflared
+
+# 4. Add wildcard CNAME in Cloudflare DNS:
+#    *.cfworkers.dpdns.org CNAME <TUNNEL_ID>.cfargotunnel.com (proxied)
+
+# 5. Create an Ingress for your service:
+sudo /opt/zeabur-fixes/expose-service.sh stalwart environment-XXX service-XXX 8080
+# => https://stalwart.cfworkers.dpdns.org is now publicly accessible
+```
+
+### Verification
+
+```bash
+# Public access from any device
+curl -I https://stalwart.cfworkers.dpdns.org/admin
+# Expected: HTTP/2 302 (Stalwart WebUI redirect)
+
+# Tunnel health
+sudo systemctl status cloudflared
+# Expected: Active: active (running), 4 connections to Cloudflare SIN edge
+
+# Ingress exists in k8s
+sudo kubectl -n environment-XXX get ing stalwart-cfworkers
+# Expected: HOSTS = stalwart.cfworkers.dpdns.org, ADDRESS = 172.29.155.146
+```
+
+### Caveat
+
+This does **NOT** fix `*.zeabur.app` domains. Those remain Tailscale-only.
+The Cloudflare Tunnel gives you a parallel public URL that works from
+any device.
+
+---
+
+## 17. Sub-Subdomain Wildcard SSL Fails on Cloudflare Free
+
+### Symptoms
+
+- `*.example.com` works fine (one-level wildcard)
+- `*.sub.example.com` returns `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` in browsers
+- `openssl s_client -connect sub.example.com:443` returns `SSL alert 40`
+
+### Detection
+
+```bash
+# One-level wildcard: works
+openssl s_client -connect foo.example.com:443 -servername foo.example.com < /dev/null 2>&1 | grep -E "subject|verify return"
+# subject=CN = *.example.com
+# Verify return code: 0 (ok)
+
+# Sub-subdomain: fails
+openssl s_client -connect foo.sub.example.com:443 -servername foo.sub.example.com < /dev/null 2>&1 | grep -E "subject|verify return"
+# SSL alert 40 (no certificate matches)
+```
+
+### Root Cause
+
+Cloudflare's **Universal SSL** on the Free plan covers:
+- Apex domain: `example.com`
+- Single-level wildcard: `*.example.com`
+
+It does **NOT** cover sub-subdomain wildcards (`*.sub.example.com`). You
+need an Advanced Certificate Manager subscription for that, or you can
+use a one-level wildcard pattern with a different naming scheme.
+
+### Fix
+
+Use a **one-level wildcard** with a meaningful subdomain. Examples:
+
+| Instead of                  | Use                              |
+|-----------------------------|----------------------------------|
+| `*.sub.example.com`         | `*.example.com` (one-level)      |
+| `service-XXXX.sub.zone.com` | `service-XXXX.zone.com` (one-level) |
+
+In our setup, the base domain is `cfworkers.dpdns.org` and we use
+`<subdomain>.cfworkers.dpdns.org` for each service (stalwart, mail, etc.).
+The wildcard `*.cfworkers.dpdns.org` CNAME → tunnel covers all of them.
+
+### Verification
+
+```bash
+# Should connect successfully
+curl -I https://stalwart.cfworkers.dpdns.org/admin
+# Expected: HTTP/2 302
+```
+
+---
+
+## 18. KUBEWATCH Consumer Filter `events.>` Matches Nothing
+
+### Symptoms
+
+- zeabur-kube-watch publishes events to NATS (no errors in pod logs)
+- Stream `KUBEWATCH` accumulates messages (e.g. 535)
+- Consumer `zeabur-control-plane` shows `Unprocessed Messages: 0` but
+  `Last Delivered Message: Consumer sequence: 0 Stream sequence: 0`
+- Zeabur backend does not see any events → no auto-Ingress creation
+  (this is OK; we create Ingresses manually), no env-var population
+
+### Detection
+
+```bash
+# Actual subjects in the stream
+sudo nats stream subjects KUBEWATCH
+# Subject                                                                                                 Count
+# kube.events.server-6a23cdf424701a8493345c17.pods.zeabur-system.added.kube-system.helper-pod-delete-...   1
+# kube.events.server-6a23cdf424701a8493345c17.pods.user-service.added.environment-XXX.service-XXX-...      1
+# ...
+
+# Consumer filter (should be '>' or 'kube.>')
+sudo nats consumer info KUBEWATCH zeabur-control-plane | grep "Filter Subject"
+# Filter Subject: events.>     <-- WRONG
+```
+
+### Root Cause
+
+The consumer was originally created with `filter="events.>"` but the
+actual subjects are `kube.events.server-...`. The filter never matches,
+so the consumer never gets any messages. This is why SEI-545
+("events don't reach the Zeabur backend") partially persists even after
+JetStream is enabled.
+
+### Fix
+
+The consumer filter MUST be `>` (matches all subjects) since the subject
+prefix varies. `apply-fixes.sh` now detects and recreates the consumer
+if the filter is wrong:
+
+```bash
+sudo /opt/zeabur-fixes/apply-fixes.sh
+# [E] JetStream stream KUBEWATCH
+#   KUBEWATCH stream already exists
+#   zeabur-control-plane consumer already exists with correct filter '>'
+```
+
+If you need to do it manually:
+
+```bash
+sudo nats consumer del KUBEWATCH zeabur-control-plane -f
+sudo nats consumer add KUBEWATCH zeabur-control-plane \
+    --filter=">" --ack=explicit --pull \
+    --deliver=all --replay=instant --defaults
+```
+
+### Verification
+
+```bash
+# After fix, consumer should show unprocessed messages
+sudo nats consumer info KUBEWATCH zeabur-control-plane | grep -E "Unprocessed|Filter"
+# Filter Subject: >
+# Unprocessed Messages: 535     <-- now matches the stream contents
+```
+
+### Why not just fix it once?
+
+The consumer is durable and persists across k3s restarts. But if the
+NATS StatefulSet's PVC is wiped, the consumer is recreated from
+`apply-fixes.sh` — and the legacy script had the wrong filter. The new
+script handles both cases.
 
 ---
 

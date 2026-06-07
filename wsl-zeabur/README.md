@@ -106,6 +106,8 @@ wsl-zeabur/
 8. **SEI-545 (auto-Ingress missing)** — Local JetStream + stream + consumer fix
 9. **Stalwart "no WebAdmin"** — Use REST API at `/api/*` with HTTP Basic auth
 10. **Fixes don't persist** — k3s drop-in unit + WSL rc.local + apply-fixes.sh
+11. **Zeabur-generated `*.zeabur.app` not publicly accessible** — DNS → Tailscale IP; solved via Cloudflare Tunnel (one-level wildcard `*.cfworkers.dpdns.org`)
+12. **KUBEWATCH consumer filter `events.>` matches nothing** — Fixed to `>` in apply-fixes.sh
 
 ## Current Status
 
@@ -114,15 +116,32 @@ wsl-zeabur/
 ✅ Persistent across WSL/k3s restarts (apply-fixes.sh runs on every start)
 ✅ DNS resolution for all Zeabur domains + public DNS
 ✅ Image pulls working (docker.io, ghcr.io)
-✅ NATS JetStream enabled with KUBEWATCH stream + zeabur-control-plane consumer
-✅ HTTPS for `yjhkbkjb.zeabur.app` working (Let's Encrypt cert obtained)
-✅ Stalwart v0.11.8 accessible via REST API
+✅ NATS JetStream enabled with KUBEWATCH stream + zeabur-control-plane consumer (filter `>`)
+✅ Stalwart v0.16.8 accessible via REST API + WebUI at `/admin`
+✅ **Public HTTPS via Cloudflare Tunnel**: `https://stalwart.cfworkers.dpdns.org` works from any device
+✅ Ingress `stalwart-cfworkers` is recreated by `apply-fixes.sh` on k3s restart
+
+## Public Access Pattern (Cloudflare Tunnel)
+
+```bash
+# Expose any service to the public internet
+sudo /opt/zeabur-fixes/expose-service.sh \
+    <subdomain> \
+    <namespace> \
+    <k8s-service-name> \
+    <port>
+# e.g. creates https://<subdomain>.cfworkers.dpdns.org
+
+# Survive k3s restarts: add to PUBLIC_EXPOSURES array in persistence/apply-fixes.sh
+```
+
+See [docs/setup-walkthrough.md Step 11](docs/setup-walkthrough.md#step-11-expose-a-service-to-the-public-internet) and [troubleshooting.md §16-18](docs/troubleshooting.md) for details.
 
 ## Documentation
 
 Start with [docs/README.md](docs/README.md) — the master comprehensive document.
 
-For new issues, see [docs/troubleshooting.md](docs/troubleshooting.md) (15 cataloged issues).
+For new issues, see [docs/troubleshooting.md](docs/troubleshooting.md) (18 cataloged issues, including the 3 new public-access ones).
 
 For understanding the persistence layer, see [docs/persistence.md](docs/persistence.md).
 
@@ -136,7 +155,9 @@ wsl -d wsl_test_server_001 -- bash -c "
   sudo /usr/local/bin/kubectl get pods -n default
   echo ''; echo 'CoreDNS:'
   sudo /usr/local/bin/kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' | grep -E 'forward|rewrite'
-  echo ''; echo 'HTTPS:'
-  curl -sI https://yjhkbkjb.zeabur.app/api | head -1
+  echo ''; echo 'Public HTTPS:'
+  curl -sI https://stalwart.cfworkers.dpdns.org/admin | head -1
+  echo ''; echo 'Tunnel:'
+  systemctl is-active cloudflared
 "
 ```

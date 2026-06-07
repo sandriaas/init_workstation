@@ -373,6 +373,96 @@ To deploy a new service:
 
 ---
 
+## Step 11: Expose a Service to the Public Internet
+
+> **Why this is needed:** Zeabur's auto-generated `*.zeabur.app` domains
+> resolve to Tailscale IP `100.64.3.1` (the WSL node), which is **not
+> publicly routable** — only Tailscale mesh devices can reach it. Even
+> the wildcard `*.zeabur.app` points to AWS Global Accelerator
+> `52.223.32.133` for ACME challenges, which fail because the HTTP-01
+> challenge can't reach the WSL via Tailscale. So we use **Cloudflare
+> Tunnel** for public access.
+
+### A. One-time Cloudflare Setup (already done in this repo)
+
+The `config/cloudflared/` and `config/systemd/cloudflared.service` files
+are pre-configured. If you're starting fresh:
+
+1. Create a Cloudflare account, add a DNS zone (e.g. `cfworkers.dpdns.org`)
+2. Create a tunnel: `cloudflared tunnel create wsl-fx506-stalwart`
+3. Save the credentials JSON to `/etc/cloudflared/credentials.json` (chmod 600)
+4. Add a wildcard CNAME in Cloudflare DNS:
+   - Type: `CNAME`
+   - Name: `*`
+   - Target: `<TUNNEL_ID>.cfargotunnel.com`
+   - Proxy: ON (orange cloud)
+5. Edit `/etc/cloudflared/config.yml` with your tunnel ID and credentials path
+6. Enable the systemd service: `sudo systemctl enable --now cloudflared`
+
+**Important:** Use a **one-level wildcard** (`*.example.com`), not a
+sub-subdomain wildcard (`*.sub.example.com`). Cloudflare Universal SSL
+on the Free plan only covers one-level wildcards.
+
+### B. Expose a service
+
+Once cloudflared is running, expose a service with one command:
+
+```bash
+wsl -d wsl_test_server_001 -- bash -c "
+  sudo /opt/zeabur-fixes/expose-service.sh <subdomain> <namespace> <service-name> <port>
+"
+```
+
+Example (Stalwart):
+
+```bash
+sudo /opt/zeabur-fixes/expose-service.sh \
+    stalwart \
+    environment-6a242c9f95b39806d284aaa7 \
+    service-6a242f96f1be9943f1f972a7 \
+    8080
+# Creates https://stalwart.cfworkers.dpdns.org
+```
+
+The script creates a Kubernetes Ingress that the ingress-controller
+will serve. Since the wildcard CNAME already covers all `*.cfworkers.dpdns.org`,
+**no DNS changes are needed**.
+
+### C. List and unexpose
+
+```bash
+# List all public exposures
+sudo /opt/zeabur-fixes/list-exposed.sh
+
+# Remove a public exposure
+sudo /opt/zeabur-fixes/unexpose-service.sh stalwart
+```
+
+### D. Survives k3s restarts
+
+The public Ingress is **NOT** auto-created by Zeabur's ingress-controller
+(only `*.zeabur.app` ingresses are). To make your exposures survive k3s
+restarts, add them to the `PUBLIC_EXPOSURES` array in
+`persistence/apply-fixes.sh` (see comments in that file). The format is:
+
+```
+<subdomain>|<namespace>|<service-name>|<port>|<ingress-suffix>
+```
+
+For example, the stalwart entry:
+
+```
+"stalwart|environment-6a242c9f95b39806d284aaa7|service-6a242f96f1be9943f1f972a7|8080|cfworkers"
+```
+
+This produces:
+- Host: `stalwart.cfworkers.dpdns.org`
+- Ingress name: `stalwart-cfworkers`
+
+The script copies to WSL via `persistence/deploy.sh` (run after editing).
+
+---
+
 ## Backup & Maintenance
 
 ### Daily Operations

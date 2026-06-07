@@ -12,7 +12,11 @@
 #   B. CoreDNS forward to public DNS (k3s-managed coredns.yaml manifest)
 #   C. CoreDNS rewrite block for nats.zeabur.com
 #   D. NATS JetStream config (ConfigMap + StatefulSet + PVC)
-#   E. zeabur-kube-watch namespace label (so events flow into KUBEWATCH stream)
+#   E. KUBEWATCH stream + zeabur-control-plane consumer (filter '>' to match
+#      kube.events.server-*.pods.* subjects)
+#   F. Public Ingress for stalwart (stalwart.cfworkers.dpdns.org via Cloudflare
+#      Tunnel ingress-controller, NOT the broken zeabur.app domains)
+#   G. Restart workloads to pick up new resolv.conf
 #
 # All operations are idempotent: safe to run multiple times.
 #
@@ -27,6 +31,14 @@ NATS_CM="nats-config"
 NATS_STS="nats"
 NATS_NAMESPACE="default"
 POD_RESOLV="/etc/k3s-pod-resolv.conf"
+# Public exposures: <subdomain>|<namespace>|<service-name>|<port>|<suffix>
+#   host     = <subdomain>.<BASE_DOMAIN>
+#   ingress  = <subdomain>-<suffix>
+# One line per service. Idempotent reapply on k3s restart.
+PUBLIC_BASE_DOMAIN="cfworkers.dpdns.org"
+PUBLIC_EXPOSURES=(
+    "stalwart|environment-6a242c9f95b39806d284aaa7|service-6a242f96f1be9943f1f972a7|8080|cfworkers"
+)
 WANTED_FORWARD="forward . 8.8.8.8 1.0.0.1 8.8.4.4"
 WANTED_REWRITE_BLOCK='nats.zeabur.com:53 {
         errors
@@ -283,23 +295,98 @@ ensure_jetstream_stream() {
             --server="$NATS_URL" >/dev/null
         log "  created KUBEWATCH stream"
     fi
+    # Consumer: filter MUST be '>' (matches kube.events.server-*.pods.* which
+    # is the actual subject Zeabur backend publishes to). The legacy filter
+    # `events.>` was wrong and never matched, so events were silently dropped.
     if nats consumer ls KUBEWATCH -s "$NATS_URL" 2>/dev/null | grep -q zeabur-control-plane; then
-        log "  zeabur-control-plane consumer already exists"
+        # Check current filter; recreate if wrong
+        local current_filter
+        current_filter="$(nats consumer info KUBEWATCH zeabur-control-plane -s "$NATS_URL" 2>/dev/null | awk -F': ' '/Filter Subject/{print $2}' | tr -d ' ' || true)"
+        if [ "$current_filter" = ">" ]; then
+            log "  zeabur-control-plane consumer already exists with correct filter '>'"
+        else
+            log "  WARNING: consumer exists with wrong filter '$current_filter', recreating with '>'"
+            nats consumer del KUBEWATCH zeabur-control-plane -f -s "$NATS_URL" >/dev/null 2>&1 || true
+            nats consumer add KUBEWATCH zeabur-control-plane \
+                --filter=">" --ack=explicit --pull \
+                --deliver=all --replay=instant --defaults \
+                --server="$NATS_URL" >/dev/null
+            log "  recreated zeabur-control-plane consumer with filter '>'"
+        fi
     else
         nats consumer add KUBEWATCH zeabur-control-plane \
-            --durable --filter="events.>" --ack=explicit \
+            --filter=">" --ack=explicit --pull \
+            --deliver=all --replay=instant --defaults \
             --server="$NATS_URL" >/dev/null
-        log "  created zeabur-control-plane consumer"
+        log "  created zeabur-control-plane consumer with filter '>'"
     fi
+}
+
+ensure_public_ingresses() {
+    # Re-create Ingresses for any service in PUBLIC_EXPOSURES array that
+    # doesn't already exist. This is what makes stalwart.cfworkers.dpdns.org
+    # survive k3s restarts.
+    #
+    # The ingress-controller creates Ingresses for *.zeabur.app domains
+    # automatically, but those are NOT publicly routable (DNS points to
+    # Tailscale IP 100.64.3.1). Public exposure requires us to manually
+    # create an Ingress with a *.cfworkers.dpdns.org hostname, which
+    # matches the Cloudflare Tunnel wildcard CNAME.
+    log "[F] Public Ingresses (Cloudflare Tunnel)"
+    if ! "$KUBECTL" get ns default >/dev/null 2>&1; then
+        log "  SKIP: k3s not ready"
+        return 0
+    fi
+    for entry in "${PUBLIC_EXPOSURES[@]}"; do
+        IFS='|' read -r sub ns svc port suffix <<<"$entry"
+        local host="${sub}.${PUBLIC_BASE_DOMAIN}"
+        local ing_name="${sub}-${suffix}"
+        # Validate namespace exists (depends on environment being deployed)
+        if ! "$KUBECTL" get ns "$ns" >/dev/null 2>&1; then
+            log "  SKIP: namespace $ns not found (environment not yet deployed?)"
+            continue
+        fi
+        # Validate service exists
+        if ! "$KUBECTL" -n "$ns" get svc "$svc" >/dev/null 2>&1; then
+            log "  SKIP: service $ns/$svc not found"
+            continue
+        fi
+        if "$KUBECTL" -n "$ns" get ing "$ing_name" >/dev/null 2>&1; then
+            log "  Ingress $ns/$ing_name already present (host=$host)"
+            continue
+        fi
+        # Create the Ingress
+        cat <<EOF | "$KUBECTL" -n "$ns" apply -f - >/dev/null
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${ing_name}
+  namespace: ${ns}
+  annotations:
+    ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  rules:
+  - host: ${host}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ${svc}
+            port:
+              number: ${port}
+EOF
+        log "  created Ingress $ns/$ing_name for $host"
+    done
 }
 
 restart_deployments_for_resolv_conf() {
     # Pods that started before the new resolv.conf was in place need a
     # restart to pick up the new DNS servers. Restart the most affected
     # workloads only.
-    log "[F] Restarting workloads to pick up new resolv.conf"
+    log "[G] Restarting workloads to pick up new resolv.conf"
     local workloads=(
-        "deployment/ingress-controller"
         "deployment/zeabur-kube-watch"
         "deployment/zeabur-log-api"
         "deployment/zeabur-dns"
@@ -310,6 +397,13 @@ restart_deployments_for_resolv_conf() {
             log "  restarted $w"
         fi
     done
+    # ingress-controller is a DaemonSet (rolling restart not natively supported;
+    # delete the pod so the DaemonSet controller re-creates it with the new
+    # resolv.conf baked in).
+    if "$KUBECTL" -n "$NATS_NAMESPACE" get ds ingress-controller >/dev/null 2>&1; then
+        "$KUBECTL" -n "$NATS_NAMESPACE" delete pod -l app.kubernetes.io/name=ingress-controller --grace-period=30 >/dev/null 2>&1 || true
+        log "  restarted ds/ingress-controller (via pod delete)"
+    fi
     # StatefulSet
     if "$KUBECTL" -n "$NATS_NAMESPACE" get sts nats >/dev/null 2>&1; then
         local replicas
@@ -330,6 +424,7 @@ main() {
         fix_coredns_forward
         fix_nats_jetstream
         ensure_jetstream_stream
+        ensure_public_ingresses
         restart_deployments_for_resolv_conf
     fi
     log "==== apply-fixes.sh done ===="
