@@ -18,6 +18,17 @@ INGRESS_NAME="${SUBDOMAIN//./-}-cfworkers"
 HOST="${SUBDOMAIN}.cfworkers.dpdns.org"
 KUBECONFIG_PATH="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 export KUBECONFIG="$KUBECONFIG_PATH"
+EXPOSURES_DIR="${EXPOSURES_DIR:-/opt/zeabur-fixes/exposures.d}"
+EXPOSURE_FILE="${EXPOSURES_DIR}/${SUBDOMAIN}.conf"
+
+echo "=== Removing persisted exposure ==="
+if [ -f "$EXPOSURE_FILE" ]; then
+  rm -f "$EXPOSURE_FILE"
+  echo "  removed $EXPOSURE_FILE (apply-fixes.sh will no longer re-create this Ingress)"
+else
+  echo "  no exposure file at $EXPOSURE_FILE (nothing to un-persist)"
+fi
+echo ""
 
 echo "=== Searching for Ingress: ${INGRESS_NAME} ==="
 INGRESS_INFO=$(kubectl get ing --all-namespaces -l "kubernetes.io/ingress.class!=null" -o json 2>/dev/null | python3 -c "

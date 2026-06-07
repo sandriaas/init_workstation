@@ -26,6 +26,7 @@ with root cause analysis, detection, and fixes.
 17. [Sub-Subdomain Wildcard SSL Fails on Cloudflare Free](#17-sub-subdomain-wildcard-ssl-fails-on-cloudflare-free)
 18. [KUBEWATCH Consumer Filter `events.>` Matches Nothing](#18-kubewatch-consumer-filter-events-matches-nothing)
 19. [Public URL Returns 530/502 Every k3s Restart](#19-public-url-returns-530502-every-k3s-restart)
+20. [WSL2 VM Keeps Shutting Down (vmIdleTimeout / Modern Standby)](#20-wsl2-vm-keeps-shutting-down-vmidletimeout--modern-standby)
 
 ---
 
@@ -1163,6 +1164,184 @@ CoreDNS forward, the NATS JetStream stream, the KUBEWATCH consumer, the
 public Ingress, etc. when k3s restarts and reverts those settings. The
 lock + marker approach keeps all those fixes but stops the gratuitous
 ingress-controller restarts.
+
+---
+
+## 20. WSL2 VM Keeps Shutting Down (vmIdleTimeout / Modern Standby)
+
+### Symptoms
+
+- `wsl -d wsl_test_server_001 -- echo uptime` returns **`< 60s`** even though
+  you've been "using" the WSL for minutes
+- Tailscale mesh comes up, holds for ~30-90s, then the node drops and the
+  dashboard flips to "1 server needs attention"
+- k3s pods restart every 1-2 minutes (`kubectl get pods -A` shows non-zero
+  `RESTARTS` accumulating)
+- `apply-fixes.sh` runs frequently (`/var/log/zeabur-fixes.log` has many
+  `==== apply-fixes.sh start ====` entries spaced ~60s apart)
+- All fixes in `apply-fixes.sh` look correct — the problem is upstream of it
+- After ANY of these, it briefly works again:
+  - `wsl --shutdown` (works for ~2 min)
+  - Clicking on the WSL terminal window (works for ~2 min)
+  - Plugging in / unplugging the charger
+
+### Detection
+
+```powershell
+# From Windows PowerShell: how long since the WSL VM was last running?
+wsl -d wsl_test_server_001 -- echo "$(uptime)"
+
+# Expected (good): up 5 minutes, ...
+# Expected (bad):  up 0 minutes, ...    (always sub-minute)
+```
+
+```bash
+# From inside WSL: was the VM suspended recently?
+journalctl --since "1 hour ago" --no-pager | grep -E "suspend|wakeup" | wc -l
+# Expected (good): 0
+# Expected (bad):  20+   <-- VM is bouncing
+```
+
+```powershell
+# From Windows: what are the sleep / Modern Standby settings?
+powercfg -query SCHEME_CURRENT SUB_SLEEP STANDBYIDLE | Select-String "Current"
+powercfg -query SCHEME_CURRENT SUB_SLEEP UNATTENDSLEEP | Select-String "Current"
+powercfg -availablesleepstates
+# If the last command shows "S0 Low Power Idle", you have Modern Standby.
+```
+
+### Root Cause
+
+Windows machines with **Modern Standby (S0 Low Power Idle)** periodically
+suspend the system even when on AC power, and Windows also has a default
+**WSL2 idle timeout** that shuts down the WSL VM after **60 seconds of
+"no WSL process running"** (per Microsoft: `vmIdleTimeout=60000` is the
+default).
+
+A related problem: the Windows "Balanced" power scheme has a non-zero
+`UNATTENDSLEEP` AC timeout (usually 2 minutes) that fires when the user
+is detected "idle" — even with the screen on.
+
+So the death cycle is:
+
+```
+1. User "uses" the WSL (any process)
+2. User walks away / closes the terminal
+3. 60s later: WSL VM shuts down (vmIdleTimeout)
+4. 120s later: Windows Modern Standby would also kick in (UNATTENDSLEEP)
+5. tailscaled, k3s, cloudflared all die with the VM
+6. Dashboard reports "disconnected"
+7. Apply-fixes.sh runs on every VM start, races itself, public URL is flaky
+```
+
+The cgroup / SIGTERM fixes in `troubleshooting.md` §2 are SYMPTOMS, not
+the root cause. As long as the VM is dying every 60-120s, nothing in
+the WSL can be stable.
+
+### Fix (Permanent)
+
+Two changes, both on the Windows host:
+
+**1. Set `vmIdleTimeout=2147483647` (max int) in `.wslconfig`**
+
+Edit `C:\Users\<user>\.wslconfig`:
+
+```ini
+[wsl2]
+memory=8GB
+processors=4
+swap=2GB
+networkingMode=nat
+vmIdleTimeout=2147483647     ; <-- ADD THIS LINE
+```
+
+Then from PowerShell:
+
+```powershell
+wsl --shutdown
+# Wait 10s, then re-launch your distro
+wsl -d wsl_test_server_001
+```
+
+`vmIdleTimeout=2147483647` is 68 years — effectively "never". Microsoft
+documented this setting in WSL 2.0.0+; older versions silently ignore it
+(use the [GitHub issue workaround](https://github.com/microsoft/WSL/issues/8496)
+or just live with the WSL dying when the laptop sleeps, which we'll fix next).
+
+**2. Disable Windows Modern Standby / unattended sleep on AC and DC**
+
+Run from an *elevated* PowerShell (Run as Administrator):
+
+```powershell
+# Apply to all power schemes
+$schemes = powercfg -list | Select-String "Power Scheme GUID" | ForEach-Object { ($_ -split ":")[1].Trim() }
+foreach ($s in $schemes) {
+    powercfg -setactive $s
+    # Never sleep on AC or DC
+    powercfg -change -standby-timeout-ac 0
+    powercfg -change -standby-timeout-dc 0
+    # Never hibernate
+    powercfg -change -hibernate-timeout-ac 0
+    powercfg -change -hibernate-timeout-dc 0
+    # Disable unattended sleep
+    powercfg -setacvalueindex $s SUB_SLEEP UNATTENDSLEEP 0
+    powercfg -setdcvalueindex $s SUB_SLEEP UNATTENDSLEEP 0
+    # Belt-and-suspenders: also kill the legacy STANDBYIDLE
+    powercfg -setacvalueindex $s SUB_SLEEP STANDBYIDLE 0
+    powercfg -setdcvalueindex $s SUB_SLEEP STANDBYIDLE 0
+}
+```
+
+If your machine is on a **domain** with a Group Policy that re-enables
+sleep every reboot, run `gpresult /h sleep.html` and look at
+`Computer Configuration → Administrative Templates → System → Power Management`.
+Domain GPOs can override per-user `powercfg` settings on every reboot.
+
+### Verification
+
+```powershell
+# 1. WSL VM should NOT die when you walk away
+$elapsed = Measure-Command {
+    # Do nothing for 3 minutes
+    Start-Sleep -Seconds 180
+}
+wsl -d wsl_test_server_001 -- uptime
+# Expected: up 3 minutes, ... (NOT "0 minutes")
+
+# 2. Dashboard should NOT flip to "1 server needs attention" over 5 min
+Start-Sleep -Seconds 300
+curl -s -H "Authorization: Bearer $env:ZEABUR_TOKEN" `
+    -H "Content-Type: application/json" `
+    -d '{"query":"{ server(_id: \"server-6a23cdf424701a8493345c17\") { status } }"}' `
+    https://api.zeabur.com/graphql
+# Expected: status = "ONLINE" or "READY", not "DISCONNECTED"
+```
+
+### Why we don't use a WSL-side watchdog
+
+We tried writing a systemd timer that would `wsl --shutdown` and
+re-launch on certain conditions, but that's whack-a-mole. The right fix
+is to keep the VM from dying in the first place. Once the host settings
+are correct, the WSL stays up indefinitely and **all** the
+apply-fixes.sh / cluster fixes / Tailscale work is automatically
+stable.
+
+If you absolutely must run a WSL-side watchdog (e.g. on a laptop that
+still sleeps for hardware reasons), see
+[scripts/fixes/persist-tailscale.sh](../scripts/fixes/persist-tailscale.sh) —
+the `start-tailscale.sh` detached launcher will at least keep tailscaled
+from being SIGTERM'd by systemd restarts. But the VM can still die.
+
+### What does NOT fix this
+
+- ❌ Setting `cgroup-driver=cgroupfs` (fixes kubelet, not VM)
+- ❌ Disabling systemd in WSL (worse, breaks k3s)
+- ❌ Adding memory limits to `.wslconfig` (irrelevant)
+- ❌ Increasing `swap=8GB` (irrelevant)
+- ❌ Setting Windows "Power mode" to "Best performance" (only changes
+  the visible UI, doesn't change the underlying timeouts unless you
+  also `powercfg` it)
+- ❌ `wsl --update` (no behavior change for vmIdleTimeout)
 
 ---
 

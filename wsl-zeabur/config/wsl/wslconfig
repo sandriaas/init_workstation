@@ -12,6 +12,12 @@ processors=4
 # Swap size (helps when memory is pressured)
 swap=2GB
 
+# CRITICAL: never let the WSL VM shut down on idle.
+# Microsoft's default vmIdleTimeout=60000 (60s) was killing the VM every
+# minute on this machine, which broke Tailscale, k3s, and the public
+# tunnel. 2147483647 = max int32 = ~68 years. See troubleshooting.md §20.
+vmIdleTimeout=2147483647
+
 # Notes on settings that BROKE the setup:
 # - dnsTunneling=true caused Tailscale mesh to flap every 30s
 # - autoMemoryReclaim (WSL 2.6.3.0+ only) - unknown key on older versions

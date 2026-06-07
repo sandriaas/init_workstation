@@ -3,22 +3,29 @@
 # Compatibility script for systemd. Runs on WSL2 boot (and on every k3s
 # restart, since rc-local.service has RemainAfterExit=yes).
 #
+# rc-local.service uses Type=oneshot + RemainAfterExit=yes. That matters:
+# it keeps the unit's cgroup alive after this script exits, so the detached
+# tailscaled started below is NOT garbage-collected. This is the proven design.
+#
 # Steps:
-#  1. Start Tailscale (workaround for WSL2 SIGTERM restart loop)
-#  2. Re-apply Zeabur cluster fixes (CoreDNS forward, NATS JetStream, etc.)
-#     This is also called from k3s.service.d/override.conf ExecStartPost
-#     after k3s is fully up, so cluster fixes are applied twice — once
-#     before k3s and once after — but the script is idempotent.
+#  1. Start Tailscale, detached, via the single-instance launcher. tailscaled
+#     must NOT run as its own systemd service on WSL2 - WSL/init SIGTERMs
+#     systemd services on every network reset, causing a 30-60s flap loop.
+#     The launcher uses an flock guard so only ever ONE tailscaled runs.
+#  2. Re-apply Zeabur cluster fixes (CoreDNS forward, NATS JetStream, etc.).
+#     This is also called from k3s.service.d/override.conf ExecStartPost after
+#     k3s is fully up, so cluster fixes run twice - the script is idempotent.
 
-set -e
+# Do NOT use `set -e`: a single failing step must not abort rc.local (which
+# would mark rc-local.service failed and skip later steps).
 
-# 1. Tailscale
+# 1. Tailscale (detached, single-instance)
 if [ -x /usr/local/bin/start-tailscale.sh ]; then
-    /usr/local/bin/start-tailscale.sh
+    /usr/local/bin/start-tailscale.sh || true
 fi
 
-# 2. Zeabur cluster fixes (pre-k3s phase; only the resolv.conf part runs
-#    here since k3s isn't up yet)
+# 2. Zeabur cluster fixes (pre-k3s phase; only the resolv.conf part runs here
+#    since k3s isn't up yet)
 if [ -x /opt/zeabur-fixes/apply-fixes.sh ]; then
     /opt/zeabur-fixes/apply-fixes.sh || true
 fi

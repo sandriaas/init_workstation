@@ -6,8 +6,27 @@ set -e
 
 KUBECONFIG_PATH="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 export KUBECONFIG="$KUBECONFIG_PATH"
+EXPOSURES_DIR="${EXPOSURES_DIR:-/opt/zeabur-fixes/exposures.d}"
 
-echo "=== Public exposures (cfworkers.dpdns.org) ==="
+echo "=== Persisted exposures (survive k3s restarts) ==="
+echo "  Source: ${EXPOSURES_DIR}/*.conf (re-applied by apply-fixes.sh on every k3s start)"
+echo ""
+if [ -d "$EXPOSURES_DIR" ] && compgen -G "${EXPOSURES_DIR}/*.conf" > /dev/null; then
+  for f in "${EXPOSURES_DIR}"/*.conf; do
+    sub=""; ns=""; svc=""; port=""
+    while IFS='=' read -r key val; do
+      case "$key" in
+        sub) sub="$val" ;; ns) ns="$val" ;; svc) svc="$val" ;; port) port="$val" ;;
+      esac
+    done < <(grep -E '^[a-z]+=' "$f")
+    printf '  https://%-40s -> %s/%s:%s\n' "${sub}.cfworkers.dpdns.org" "$ns" "$svc" "$port"
+  done
+else
+  echo "  (none persisted yet)"
+fi
+echo ""
+
+echo "=== Live Ingresses (cfworkers.dpdns.org) ==="
 echo ""
 kubectl get ing --all-namespaces -o json 2>/dev/null | python3 -c "
 import json, sys

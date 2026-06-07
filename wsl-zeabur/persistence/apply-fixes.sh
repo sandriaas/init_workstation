@@ -42,14 +42,21 @@ RESOLV_CREATED_MARKER="/var/run/zeabur-fixes-resolv-created"
 # see the marker from the winner and trigger a second ingress-controller
 # restart. mkdir(1) is atomic on POSIX, so we use it as a file lock.
 LOCK_DIR="/var/run/zeabur-fixes.lock"
-# Public exposures: <subdomain>|<namespace>|<service-name>|<port>|<suffix>
-#   host     = <subdomain>.<BASE_DOMAIN>
-#   ingress  = <subdomain>-<suffix>
-# One line per service. Idempotent reapply on k3s restart.
+# Public exposures are DATA, not code. Each exposed service is one file in
+# EXPOSURES_DIR named <subdomain>.conf containing four lines:
+#   sub=<subdomain>
+#   ns=<namespace>
+#   svc=<k8s-service-name>
+#   port=<port>
+# The ingress is named <subdomain>-<EXPOSURE_SUFFIX> and the host is
+# <subdomain>.<PUBLIC_BASE_DOMAIN>. To add a new public domain you drop a
+# file in EXPOSURES_DIR (the expose-service.sh helper does this for you) -
+# NEVER edit this script. apply-fixes.sh re-creates every Ingress described
+# by these files on each k3s restart, so any exposed service survives
+# restarts exactly like stalwart does.
 PUBLIC_BASE_DOMAIN="cfworkers.dpdns.org"
-PUBLIC_EXPOSURES=(
-    "stalwart|environment-6a242c9f95b39806d284aaa7|service-6a242f96f1be9943f1f972a7|8080|cfworkers"
-)
+EXPOSURE_SUFFIX="cfworkers"
+EXPOSURES_DIR="/opt/zeabur-fixes/exposures.d"
 WANTED_FORWARD="forward . 8.8.8.8 1.0.0.1 8.8.4.4"
 WANTED_REWRITE_BLOCK='nats.zeabur.com:53 {
         errors
@@ -344,24 +351,53 @@ ensure_jetstream_stream() {
 }
 
 ensure_public_ingresses() {
-    # Re-create Ingresses for any service in PUBLIC_EXPOSURES array that
-    # doesn't already exist. This is what makes stalwart.cfworkers.dpdns.org
-    # survive k3s restarts.
+    # Re-create Ingresses for every exposure file in EXPOSURES_DIR that
+    # doesn't already exist. This is what makes any exposed service (e.g.
+    # stalwart.cfworkers.dpdns.org) survive k3s restarts.
     #
     # The ingress-controller creates Ingresses for *.zeabur.app domains
     # automatically, but those are NOT publicly routable (DNS points to
     # Tailscale IP 100.64.3.1). Public exposure requires us to manually
     # create an Ingress with a *.cfworkers.dpdns.org hostname, which
     # matches the Cloudflare Tunnel wildcard CNAME.
+    #
+    # Exposures are data-driven (one .conf file per service in
+    # EXPOSURES_DIR). To add a domain, use expose-service.sh - never edit
+    # this script.
     log "[F] Public Ingresses (Cloudflare Tunnel)"
     if ! "$KUBECTL" get ns default >/dev/null 2>&1; then
         log "  SKIP: k3s not ready"
         return 0
     fi
-    for entry in "${PUBLIC_EXPOSURES[@]}"; do
-        IFS='|' read -r sub ns svc port suffix <<<"$entry"
+    if [ ! -d "$EXPOSURES_DIR" ]; then
+        log "  no exposures dir ($EXPOSURES_DIR); nothing to expose"
+        return 0
+    fi
+    shopt -s nullglob
+    local files=("$EXPOSURES_DIR"/*.conf)
+    shopt -u nullglob
+    if [ "${#files[@]}" -eq 0 ]; then
+        log "  no exposure files in $EXPOSURES_DIR; nothing to expose"
+        return 0
+    fi
+    local f sub ns svc port
+    for f in "${files[@]}"; do
+        sub=""; ns=""; svc=""; port=""
+        # Parse simple key=value lines. Ignore comments/blank lines.
+        while IFS='=' read -r key val; do
+            case "$key" in
+                sub)  sub="$val" ;;
+                ns)   ns="$val" ;;
+                svc)  svc="$val" ;;
+                port) port="$val" ;;
+            esac
+        done < <(grep -E '^[a-z]+=' "$f")
+        if [ -z "$sub" ] || [ -z "$ns" ] || [ -z "$svc" ] || [ -z "$port" ]; then
+            log "  SKIP: malformed exposure file $(basename "$f")"
+            continue
+        fi
         local host="${sub}.${PUBLIC_BASE_DOMAIN}"
-        local ing_name="${sub}-${suffix}"
+        local ing_name="${sub}-${EXPOSURE_SUFFIX}"
         # Validate namespace exists (depends on environment being deployed)
         if ! "$KUBECTL" get ns "$ns" >/dev/null 2>&1; then
             log "  SKIP: namespace $ns not found (environment not yet deployed?)"

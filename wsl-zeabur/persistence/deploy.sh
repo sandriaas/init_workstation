@@ -74,6 +74,29 @@ main() {
     copy_to_wsl "persistence/rc.local" "/etc/rc.local"
     wsl_run "chmod +x /etc/rc.local"
 
+    # 5b. start-tailscale.sh (the detached launcher with flock guard)
+    if [ -f "$REPO_ROOT/config/systemd/start-tailscale.sh" ]; then
+        copy_to_wsl "config/systemd/start-tailscale.sh" "/usr/local/bin/start-tailscale.sh"
+    fi
+
+    # 5c. tailscaled systemd override (Restart=no, KillMode=process, etc.)
+    if [ -f "$REPO_ROOT/config/systemd/tailscaled-override.conf" ]; then
+        wsl_run "mkdir -p /etc/systemd/system/tailscaled.service.d"
+        copy_to_wsl "config/systemd/tailscaled-override.conf" \
+                    "/etc/systemd/system/tailscaled.service.d/override.conf"
+        wsl_run "systemctl daemon-reload"
+    fi
+
+    # 5d. rc-local.service (Type=oneshot, RemainAfterExit=yes - keeps cgroup alive)
+    if [ -f "$REPO_ROOT/config/systemd/rc-local.service" ]; then
+        copy_to_wsl "config/systemd/rc-local.service" "/etc/systemd/system/rc-local.service"
+        wsl_run "systemctl daemon-reload && systemctl enable rc-local.service"
+    fi
+
+    # 5e. Disable systemd-managed tailscaled (the detached launcher owns it)
+    wsl_run "systemctl disable tailscaled 2>/dev/null || true"
+    wsl_run "systemctl stop tailscaled 2>/dev/null || true"
+
     # 6. cloudflared config (if present)
     if [ -d "$REPO_ROOT/config/cloudflared" ]; then
         log "Copying cloudflared config"
@@ -97,12 +120,29 @@ main() {
         wsl_run "systemctl daemon-reload && systemctl enable cloudflared.service"
     fi
 
-    # 8. Domain scripts
-    for f in expose-service.sh unexpose-service.sh list-exposed.sh; do
-        if [ -f "$REPO_ROOT/scripts/domain/$f" ]; then
-            copy_to_wsl "scripts/domain/$f" "/opt/zeabur-fixes/$f"
+    # 8. Domain scripts (repo uses numbered prefixes; deploy under stable names)
+    declare -A domain_scripts=(
+        ["scripts/domain/02-expose-service.sh"]="/opt/zeabur-fixes/expose-service.sh"
+        ["scripts/domain/05-unexpose-service.sh"]="/opt/zeabur-fixes/unexpose-service.sh"
+        ["scripts/domain/06-list-exposed.sh"]="/opt/zeabur-fixes/list-exposed.sh"
+    )
+    for src in "${!domain_scripts[@]}"; do
+        if [ -f "$REPO_ROOT/${src#scripts/domain/}" ] || [ -f "$REPO_ROOT/$src" ]; then
+            copy_to_wsl "$src" "${domain_scripts[$src]}"
         fi
     done
+
+    # 9. Public exposures (data-driven). Seed any *.conf shipped in the repo
+    #    under persistence/exposures.d/ so a fresh machine re-creates the same
+    #    public Ingresses. Never hardcoded in apply-fixes.sh.
+    if [ -d "$REPO_ROOT/persistence/exposures.d" ]; then
+        wsl_run "mkdir -p /opt/zeabur-fixes/exposures.d"
+        for f in "$REPO_ROOT/persistence/exposures.d/"*.conf; do
+            [ -f "$f" ] || continue
+            fname="$(basename "$f")"
+            copy_to_wsl "persistence/exposures.d/$fname" "/opt/zeabur-fixes/exposures.d/$fname" "0644"
+        done
+    fi
 
     log "=== Deployment complete ==="
     log ""
