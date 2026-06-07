@@ -31,6 +31,17 @@ NATS_CM="nats-config"
 NATS_STS="nats"
 NATS_NAMESPACE="default"
 POD_RESOLV="/etc/k3s-pod-resolv.conf"
+# Marker file used to track whether the resolv.conf was newly created in
+# this run. We only restart workloads on the *first* run after the file is
+# created; subsequent runs (when the file already exists) leave running pods
+# alone so we don't disrupt the ingress-controller / cloudflared tunnel.
+RESOLV_CREATED_MARKER="/var/run/zeabur-fixes-resolv-created"
+# Lock directory: when k3s restarts twice in a row (which happens often on
+# WSL2 with Modern Standby), systemd fires TWO ExecStartPost hooks back-to-back
+# and we get two apply-fixes.sh processes racing. The losing process used to
+# see the marker from the winner and trigger a second ingress-controller
+# restart. mkdir(1) is atomic on POSIX, so we use it as a file lock.
+LOCK_DIR="/var/run/zeabur-fixes.lock"
 # Public exposures: <subdomain>|<namespace>|<service-name>|<port>|<suffix>
 #   host     = <subdomain>.<BASE_DOMAIN>
 #   ingress  = <subdomain>-<suffix>
@@ -89,8 +100,18 @@ options edns0 trust-ad
 search default.svc.cluster.local svc.cluster.local cluster.local
 EOF
         log "  created $POD_RESOLV"
+        # Mark that the file was just created so the restart phase knows
+        # this is the first run (the only time a restart is actually
+        # needed to pick up the new DNS servers).
+        mkdir -p "$(dirname "$RESOLV_CREATED_MARKER")"
+        : > "$RESOLV_CREATED_MARKER"
     else
         log "  $POD_RESOLV already present"
+        # File already existed: the resolv.conf is stable and immutable,
+        # so we MUST NOT restart any workloads (that would break the
+        # ingress-controller / cloudflared tunnel for ~30s every k3s
+        # start). See the [G] step.
+        rm -f "$RESOLV_CREATED_MARKER"
     fi
     # Immutable to prevent WSL from overwriting on next wsl.conf change
     chattr +i "$POD_RESOLV" 2>/dev/null || true
@@ -383,9 +404,23 @@ EOF
 
 restart_deployments_for_resolv_conf() {
     # Pods that started before the new resolv.conf was in place need a
-    # restart to pick up the new DNS servers. Restart the most affected
-    # workloads only.
-    log "[G] Restarting workloads to pick up new resolv.conf"
+    # restart to pick up the new DNS servers.
+    #
+    # IMPORTANT: This is only needed on the FIRST run after /etc/k3s-pod-resolv.conf
+    # is created. On subsequent k3s starts, the file is already there and is
+    # immutable, so pods that are already running with the correct resolv.conf
+    # MUST NOT be restarted - doing so disrupts the ingress-controller and
+    # breaks the Cloudflare tunnel for ~30s (HTTP 530/502 from public URL).
+    #
+    # We gate this on the presence of the marker file written by
+    # fix_pod_resolv_conf(). If the marker is absent, the resolv.conf was
+    # already in place when this run started, so the workloads are already
+    # up-to-date and we skip the restart.
+    if [ ! -f "$RESOLV_CREATED_MARKER" ]; then
+        log "[G] SKIP: resolv.conf was already in place at start; no restart needed"
+        return 0
+    fi
+    log "[G] Restarting workloads to pick up new resolv.conf (first run after resolv.conf created)"
     local workloads=(
         "deployment/zeabur-kube-watch"
         "deployment/zeabur-log-api"
@@ -418,6 +453,16 @@ restart_deployments_for_resolv_conf() {
 
 main() {
     require_root
+    # Acquire exclusive lock: if another apply-fixes.sh is already running
+    # (e.g. systemd fired two ExecStartPost hooks back-to-back because k3s
+    # restarted twice in a row), exit immediately. The first process owns
+    # the entire fix pass; the second is a no-op.
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        log "==== apply-fixes.sh SKIP: another instance holds the lock ===="
+        exit 0
+    fi
+    # Make sure the lock is released no matter how we exit.
+    trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
     log "==== apply-fixes.sh start ===="
     fix_pod_resolv_conf
     if wait_for_k3s; then
