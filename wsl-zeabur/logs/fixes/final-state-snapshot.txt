@@ -1,0 +1,20 @@
+=== FINAL STATE ===
+
+--- Tailscale ---
+100.64.3.1  desktop-hsbf3et                adb4b8c0-9556-428d-8575-0d9b9739fdfe  linux  -                                           
+100.64.0.1  lke505319-728018-5b5f0f5f0000  c3832b8c-7310-4fc2-b502-925ff6c562b8  linux  active; relay "sfo", tx 7169912 rx 1313008  
+
+--- All 9 System Pods ---
+NAME                                READY   STATUS    RESTARTS         AGE
+cadvisor-swl65                      1/1     Running   28 (11m ago)     9h
+fluent-bit-87fch                    1/1     Running   37 (9m55s ago)   9h
+ingress-controller-8n9fr            1/1     Running   29 (11m ago)     9h
+nats-0                              2/2     Running   58 (11m ago)     8h
+node-exporter-cxgw6                 1/1     Running   29 (11m ago)     9h
+vector-aggregator-d5c7cc7d7-wd5tq   1/1     Running   31 (10m ago)     9h
+zeabur-dns-5dc4f478b4-x22b7         1/1     Running   27 (11m ago)     9h
+zeabur-kube-watch-b8d9dd6c9-m9tzg   1/1     Running   0                3m43s
+zeabur-log-api-7dbd78668d-ff5tl     1/1     Running   29 (11m ago)     9h
+
+--- DNS Verification ---
+

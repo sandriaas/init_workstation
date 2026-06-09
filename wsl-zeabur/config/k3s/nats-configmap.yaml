@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  namespace: default
+data:
+  nats.conf: |
+    port: 4222
+    pid_file: "/var/run/nats/nats.pid"
+    http: 8222
+    server_name: $POD_NAME
+    lame_duck_grace_period: 10s
+    lame_duck_duration: 30s
+    # Auth disabled: zeabur-kube-watch binary ignores NATS_URL/NATS_USER/NATS_PASSWORD
+    # env vars (hardcoded), so the simplest fix is to run NATS without auth.
+    # See: docs/troubleshooting.md#nats-authentication-issue

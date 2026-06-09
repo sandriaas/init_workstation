@@ -709,7 +709,185 @@ autoMemoryReclaim=gradual
 
 ---
 
+## Tailscale Restart Loop Fix (CRITICAL)
+
+### Symptom
+- `tailscaled` starts, connects, gets mesh IP (e.g., `100.64.3.1`)
+- After 30-60 seconds, daemon receives `SIGTERM`
+- systemd restarts it (`Restart=on-failure`)
+- Cycle repeats forever
+- Dashboard shows server as "Offline" / "Disconnected"
+- Tailscale state flapping between `NoState` and `Running`
+
+### Root Cause
+WSL2's launcher init process (PID 2, `/init`) sends `SIGTERM` to systemd services when the network interface resets. The Zeabur Tailscale default config uses `Restart=on-failure`, which causes a tight restart loop. Each restart breaks the Wonder Mesh control plane's persistent connection to the gateway (`100.64.0.1`).
+
+### The Fix (Manual, Persistent)
+
+**Step 1**: Disable systemd restart for tailscaled
+```bash
+sudo mkdir -p /etc/systemd/system/tailscaled.service.d/
+cat <<'EOF' | sudo tee /etc/systemd/system/tailscaled.service.d/override.conf
+[Service]
+Restart=no
+RestartSec=60s
+KillMode=process
+TimeoutStopSec=120s
+EOF
+sudo systemctl daemon-reload
+sudo systemctl disable tailscaled
+sudo systemctl stop tailscaled
+```
+
+**Step 2**: Create persistent auto-start script
+```bash
+cat <<'EOF' | sudo tee /usr/local/bin/start-tailscale.sh
+#!/bin/bash
+sleep 5
+if pgrep -f "/usr/sbin/tailscaled" > /dev/null; then
+  exit 0
+fi
+nohup /usr/sbin/tailscaled \
+  --state=/var/lib/tailscale/tailscaled.state \
+  --socket=/run/tailscale/tailscaled.sock \
+  --port=41641 \
+  > /var/log/tailscaled.log 2>&1 &
+EOF
+sudo chmod +x /usr/local/bin/start-tailscale.sh
+```
+
+**Step 3**: Wire to systemd via rc-local service
+```bash
+cat <<'EOF' | sudo tee /etc/rc.local
+#!/bin/bash
+/usr/local/bin/start-tailscale.sh
+exit 0
+EOF
+sudo chmod +x /etc/rc.local
+
+cat <<'EOF' | sudo tee /etc/systemd/system/rc-local.service
+[Unit]
+Description=/etc/rc.local Compatibility
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/rc.local
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable rc-local.service
+```
+
+**Step 4**: Start it now
+```bash
+sudo /usr/local/bin/start-tailscale.sh
+sleep 30
+tailscale status
+```
+
+**Expected output**: Stable connection with `100.64.3.1` and gateway at `100.64.0.1` showing `active; relay "sfo", tx <bytes> rx <bytes>`.
+
+### Why This Works
+- `Restart=no` prevents systemd from auto-restarting tailscaled when it gets SIGTERM
+- Manual `nohup` launch keeps the daemon as a detached process
+- WSL's `wsl --shutdown` / network resets no longer trigger restart loops
+- Tailscale stays connected long enough for the Wonder Mesh gateway to register the peer
+
+---
+
+## CoreDNS Rewrite Reverts Automatically (IMPORTANT)
+
+### Symptom
+- You add the rewrite: `rewrite name regex nats\.zeabur\.com nats.default.svc.cluster.local`
+- `kubectl get cm coredns -n kube-system -o jsonpath='{.data.Corefile}'` shows the rewrite
+- But pods still fail with `dial tcp: lookup nats.zeabur.com: i/o timeout`
+- `kubectl.kubernetes.io/last-applied-configuration` annotation shows the rewrite is there, but the live config doesn't
+
+### Root Cause
+K3s manages the CoreDNS ConfigMap via an Addon (Helm-style). When k3s restarts the CoreDNS pod (e.g., after a node restart), it **re-applies the addon template** which **overwrites your changes** to the ConfigMap.
+
+### The Fix
+
+**Option A**: Re-apply the rewrite manually after each k3s restart
+```bash
+sudo k3s kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    objectset.rio.cattle.io/hash: bce283298811743a0386ab510f2f67ef74240c57
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+          pods insecure
+          fallthrough in-addr.arpa ip6.arpa
+        }
+        hosts /etc/coredns/NodeHosts {
+          ttl 60
+          reload 15s
+          fallthrough
+        }
+        rewrite name regex nats\.zeabur\.com nats.default.svc.cluster.local
+        prometheus :9153
+        cache 30
+        loop
+        reload
+        loadbalance
+        import /etc/coredns/custom/*.override
+        forward . /etc/resolv.conf
+    }
+    import /etc/coredns/custom/*.server
+  NodeHosts: |
+    172.29.155.146 100.64.3.1 DESKTOP-HSBF3ET
+EOF
+sudo k3s kubectl rollout restart deployment coredns -n kube-system
+```
+
+**Option B** (Better): Use k3s Auto-Deploy Manifests
+```bash
+sudo mkdir -p /var/lib/rancher/k3s/server/manifests/
+cat <<'EOF' | sudo tee /var/lib/rancher/k3s/server/manifests/coredns-rewrite.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  rewrite.server: |
+    nats.zeabur.com {
+      errors
+      cache 30
+      rewrite name regex nats\.zeabur\.com nats.default.svc.cluster.local
+      forward . /etc/resolv.conf
+    }
+EOF
+# This file is auto-deployed by k3s on every restart
+```
+
+The `import /etc/coredns/custom/*.server` line in the Corefile will pick up this file automatically.
+
+---
+
 ## Changelog
+
+### 2026-06-07 - Tailscale Stability + CoreDNS Persistence
+- Diagnosed Tailscale restart loop (SIGTERM from WSL2 init)
+- Disabled systemd `Restart=on-failure` for tailscaled
+- Created `start-tailscale.sh` and `rc-local.service` for persistent auto-start
+- Re-applied CoreDNS rewrite (was reverted by k3s addon manager)
+- All 9 Zeabur system components stable (zeabur-kube-watch 0 restarts)
+- Tailscale stable connection to gateway (100.64.0.1) via relay "sfo"
+- Verified DNS resolution for zeabur.com, wonder.zeabur.com, api.zeabur.com all work
 
 ### 2026-06-06 - Initial Setup
 - Installed WSL2 Ubuntu 24.04 (wsl_test_server_001)
@@ -724,6 +902,8 @@ autoMemoryReclaim=gradual
 
 ---
 
-**Status**: ✅ All Zeabur Wonder Mesh components operational  
-**Dashboard**: Server should show as "Healthy"  
+**Status**: ✅ All Zeabur Wonder Mesh components operational and stable  
+**Dashboard**: Server should now show as "Healthy" (was "Offline" before fix)  
+**Tailscale**: Connected to gateway 100.64.0.1 via relay "sfo"  
+**Mesh IP**: 100.64.3.1 (stable)  
 **Next Steps**: Deploy services from Zeabur dashboard

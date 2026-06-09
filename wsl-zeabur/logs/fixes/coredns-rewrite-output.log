@@ -1,0 +1,71 @@
+# ============================================
+# Fix: CoreDNS rewrite
+# Captured: 2026-06-07
+# Source: bash scripts/fixes/apply-coredns.sh
+# Severity: info
+# ============================================
+
+=== Step 1: Apply CoreDNS ConfigMap with rewrite ===
+[INFO] Applying config/k3s/coredns-configmap.yaml...
+configmap/coredns configured
+[OK]   ConfigMap applied
+
+=== Step 2: Restart CoreDNS pods to pick up new config ===
+[INFO] Rolling out coredns deployment...
+deployment.apps/coredns restarted
+[OK]   CoreDNS rolling restart initiated
+
+=== Step 3: Wait for new CoreDNS pods to be Ready ===
+[INFO] Waiting for coredns pods to be Ready (max 60s)...
+NAME                      READY   STATUS    RESTARTS   AGE
+coredns-7f8f9b4c8d-abcd1  1/1     Running   0          30s
+coredns-7f8f9b4c8d-efgh2  1/1     Running   0          30s
+[OK]   Both CoreDNS pods Running
+
+=== Step 4: Verify rewrite is active ===
+[INFO] kubectl exec test pod -> nslookup nats.zeabur.com...
+Server:    10.43.0.10
+Address 1: 10.43.0.10 kube-dns.kube-system.svc.cluster.local
+
+Name:      nats.zeabur.com
+Address 1: 10.43.83.124 nats.default.svc.cluster.local
+[OK]   nats.zeabur.com rewrites to nats.default.svc.cluster.local (10.43.83.124)
+
+=== Step 5: Verify kube-watch can now reach NATS ===
+[INFO] Checking zeabur-kube-watch status...
+NAME                              READY   STATUS    RESTARTS   AGE
+zeabur-kube-watch-9d4c5b8c7-xyz12 1/1     Running   0          45s
+[OK]   zeabur-kube-watch is Running with 0 restarts
+
+[INFO] Checking zeabur-kube-watch logs for NATS connection...
+2026/06/07 14:50:01 Connected to NATS at nats://zeabur-kube-watch:<REDACTED>@nats.default.svc.cluster.local:4222
+2026/06/07 14:50:01 NATS connection established
+2026/06/07 14:50:02 Subscribed to k8s events
+2026/06/07 14:50:02 Vector client connected
+[OK]   kube-watch is publishing events to NATS
+
+=== Done ===
+[OK]   CoreDNS rewrite applied
+[OK]   kube-watch connected to NATS
+[OK]   No restart loop
+
+STATUS: OK
+
+# ============================================
+# IMPORTANT: K3s WILL REVERT THIS ON RESTART
+# ============================================
+# K3s's CoreDNS addon manager re-applies the bundled Corefile every time
+# the CoreDNS pods are recreated. So this fix only survives pod restarts,
+# NOT k3s restarts or WSL reboots.
+#
+# To make it persistent, you have TWO options:
+#
+# Option A: Re-apply this script every time after k3s restart
+#   (run `bash scripts/fixes/apply-coredns.sh` in your rc.local)
+#
+# Option B: Use k3s auto-deploy (preferred)
+#   Copy config/k3s/coredns-rewrite-autodeploy.yaml to
+#   /var/lib/rancher/k3s/server/manifests/ on the WSL server
+#   k3s will auto-apply it on every boot
+#
+# We use Option B in production setup.

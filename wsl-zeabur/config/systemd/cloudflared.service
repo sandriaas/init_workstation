@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloudflare Tunnel for WSL FX506
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cloudflared --config /etc/cloudflared/config.yml --no-autoupdate tunnel run
+Restart=on-failure
+RestartSec=10
+User=root
+LimitNOFILE=65536
+StandardOutput=append:/var/log/cloudflared.log
+StandardError=append:/var/log/cloudflared.log
+
+[Install]
+WantedBy=multi-user.target

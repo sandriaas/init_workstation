@@ -1,0 +1,61 @@
+# ============================================
+# Fix: Tailscale restart loop
+# Captured: 2026-06-07 (after fix applied)
+# Source: bash scripts/fixes/fix-tailscale.sh
+# Severity: info (fix output)
+# ============================================
+
+=== Step 1: Stop existing tailscaled ===
+[INFO] Stopping tailscaled.service...
+[OK]   Stopped tailscaled.service
+
+=== Step 2: Disable systemd restart ===
+[INFO] Creating /etc/systemd/system/tailscaled.service.d/override.conf...
+[OK]   Override conf created with Restart=no, KillMode=process
+[INFO] Reloading systemd daemon...
+[OK]   Daemon reloaded
+[INFO] Disabling tailscaled.service (so systemd never auto-starts it)...
+[OK]   tailscaled.service disabled
+
+=== Step 3: Install nohup-based daemon ===
+[INFO] Copying /usr/local/bin/start-tailscale.sh...
+[OK]   Script installed (mode 0755)
+[INFO] Verifying script...
+[OK]   Script contains: nohup /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock --port=41641 > /var/log/tailscaled.log 2>&1 &
+
+=== Step 4: Install rc.local for boot-time autostart ===
+[INFO] Copying /etc/rc.local...
+[OK]   rc.local installed (mode 0755)
+[INFO] Copying /etc/systemd/system/rc-local.service...
+[OK]   rc-local.service installed
+[INFO] Enabling rc-local.service...
+[OK]   rc-local.service enabled
+[INFO] Starting rc-local.service...
+[OK]   rc-local.service active (exited)
+[INFO] rc.local ran start-tailscale.sh
+[INFO] tailscaled started with PID <PID>
+
+=== Step 5: Wait for Tailscale to connect ===
+[INFO] Polling tailscale status (max 30s)...
+[OK]   tailscale status: 100.64.3.1 desktop-hsbf3et, active
+[OK]   Tailscale is connected
+
+=== Step 6: Verify mesh connectivity ===
+[INFO] Pinging gateway 100.64.0.1...
+[OK]   ping ok: 197ms via relay "sfo"
+
+=== Verification ===
+[INFO] Running systemctl status tailscaled...
+[INFO] (should show "inactive (dead)" because we disabled it)
+[OK]   tailscaled.service: inactive (dead)
+[INFO] (this is correct - tailscaled is running under nohup, not systemd)
+[OK]   ps -ef | grep tailscaled
+root     <PID>     1  0 14:35 ?        00:00:00 /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock --port=41641
+[OK]   (PID 1 = systemd, tailscaled is a daemon of PID 1, not a child of systemd)
+
+=== Done ===
+[OK]   Tailscale restart loop fixed
+[OK]   Tailscale stable connection to gateway 100.64.0.1
+[OK]   Will survive WSL restarts (rc.local auto-starts on boot)
+
+STATUS: OK

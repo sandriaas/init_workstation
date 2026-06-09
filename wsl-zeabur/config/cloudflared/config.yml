@@ -1,0 +1,29 @@
+# /etc/cloudflared/config.yml
+# Cloudflare Tunnel configuration for WSL FX506 (Stalwart service exposure)
+#
+# Tunnel ID:  d1534e02-b697-4e99-bb0d-cf04c79199a9
+# Tunnel name: wsl-fx506-stalwart
+# Zone:       cfworkers.dpdns.org (Cloudflare account 96d55ad87e6bb93a52d0d2728f0f093d)
+# Wildcard DNS: *.cfworkers.dpdns.org CNAME -> d1534e02-b697-4e99-bb0d-cf04c79199a9.cfargotunnel.com (proxied)
+#
+# Source IP: 172.29.155.146 (WSL eth0, Windows-WSL NAT). The ingress-controller
+# listens on this IP and routes by Host header. Using noTLSVerify because the
+# ingress-controller's default cert is for old zeabur.app domains, not for
+# *.cfworkers.dpdns.org — we use Cloudflare's Universal SSL on the edge
+# and trust the internal cert at the origin.
+#
+# IMPORTANT: The wildcard is one-level only. Sub-subdomain wildcards
+# (e.g. *.sub.cfworkers.dpdns.org) fail because Cloudflare Universal SSL
+# on the Free plan only covers one-level wildcards.
+#
+tunnel: d1534e02-b697-4e99-bb0d-cf04c79199a9
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: "*.cfworkers.dpdns.org"
+    service: https://172.29.155.146:443
+    originRequest:
+      noTLSVerify: true
+      connectTimeout: 30s
+      noHappyEyeballs: true
+  - service: http_status:404

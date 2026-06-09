@@ -712,12 +712,45 @@ Generated configs (per-VM, created by phase2/3):
 
 ---
 
+## WSL2 + Zeabur Wonder Mesh (Windows Path)
+
+An **alternative path** to running K3s on Windows: instead of KVM (vm_1, vm_2),
+you can run [Zeabur Wonder Mesh](https://zeabur.com/wonder-mesh) inside WSL2
+Ubuntu 24.04. This turns your Windows machine into a peer in Zeabur's mesh
+network and lets you deploy services via the same Zeabur dashboard.
+
+All documentation, scripts, configs, and logs for this path live in
+[`wsl-zeabur/`](wsl-zeabur/README.md). Highlights:
+
+- **One-click install** — paste the script from the Zeabur dashboard into WSL
+- **Tailscale mesh** — your WSL gets a stable IP (`100.64.x.x`) in Zeabur's net
+- **Full K3s cluster** — runs inside WSL with all 9 system pods
+- **Production-tested fixes** — DNS, NATS, CoreDNS rewrite, Tailscale restart loop
+
+| What you get | Where |
+|--------------|-------|
+| Quick start (TL;DR) | [`wsl-zeabur/README.md`](wsl-zeabur/README.md) |
+| Master documentation (909 lines) | [`wsl-zeabur/docs/README.md`](wsl-zeabur/docs/README.md) |
+| Step-by-step setup | [`wsl-zeabur/docs/setup-walkthrough.md`](wsl-zeabur/docs/setup-walkthrough.md) |
+| Troubleshooting (13 issues) | [`wsl-zeabur/docs/troubleshooting.md`](wsl-zeabur/docs/troubleshooting.md) |
+| Architecture diagrams | [`wsl-zeabur/docs/architecture.md`](wsl-zeabur/docs/architecture.md) |
+| API endpoints + commands | [`wsl-zeabur/docs/reference.md`](wsl-zeabur/docs/reference.md) |
+| 48 diagnostic/fix scripts | [`wsl-zeabur/scripts/`](wsl-zeabur/scripts/README.md) |
+| Config files (wsl.conf, .wslconfig, k3s, systemd) | [`wsl-zeabur/config/`](wsl-zeabur/config/) |
+
+> **When to use this vs. KVM?** KVM is the production path (Rev5.7.2 above).
+> Use the WSL2 path for development, testing, or if you don't have KVM
+> available (e.g., Hyper-V conflict, no VT-d, etc.).
+
+---
+
 ## Next Steps
 
 | Priority | Action |
 |----------|--------|
 | **Verify** | `bash scripts/check.sh` — full system audit |
 | **Dokploy** | Deploy apps, add domains — DNS auto-sync handles CNAMEs |
+| **WSL2 alternative** | Try [`wsl-zeabur/`](wsl-zeabur/README.md) for a lighter-weight Zeabur setup |
 | **Phase 5** | Security hardening — fail2ban tuning, UFW |
 | **Phase 6+** | RustDesk, Server HUD, backups (see Legacy Guide) |
 

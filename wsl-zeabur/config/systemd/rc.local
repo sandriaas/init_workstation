@@ -1,0 +1,10 @@
+#!/bin/bash
+#
+# /etc/rc.local - Compatibility shim for the rc-local systemd service
+# Runs after network.target on boot
+#
+
+# Start Tailscale as a detached process (workaround for WSL2 SIGTERM flap)
+/usr/local/bin/start-tailscale.sh
+
+exit 0
