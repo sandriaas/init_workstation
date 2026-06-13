@@ -245,6 +245,17 @@ User has **not yet installed** these packages. The current setup (conversation i
 
 ---
 
+## Upgrade Log
+
+### v0.15.6 → v0.15.9 (2026-06-13)
+- New release asset layout: `codeg-server-linux-x64.tar.gz` (was `codeg-v*-x86_64-unknown-linux-gnu.tar.gz`). Ships `codeg-server`, `codeg-mcp`, and an embedded `web/` dir.
+- Verified `*.sha256` before installing.
+- Backed up old binaries + web to `~/.local/share/codeg/backup-<ts>/`.
+- codeg is **not** a systemd unit — it runs as a self-supervised process (`codeg-server --supervise`, PPID 1). Stop by killing the supervisor PID, then relaunch with the same env (`CODEG_STATIC_DIR`, `CODEG_DATA_DIR`, `ANTHROPIC_*`, `nohup ... --supervise &`).
+- Token unchanged (`a52fd2feb78b40ab8422696a85cafa43`); tunnel `codeg.easyrentbali.com` returns 200 post-upgrade.
+
+---
+
 ## Quick Reference
 
 ### Start codeg

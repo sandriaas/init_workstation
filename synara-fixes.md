@@ -1,6 +1,46 @@
 # Synara Fixes Log
 
-> Last updated: 2026-06-12 — Synara v0.1.9
+> Last updated: 2026-06-13 — Synara v0.2.0
+
+## 8. `SocketOpenError: timeout waiting for "open"` + "not connected" disconnects (2026-06-13)
+
+**Reported symptom:** Web UI repeatedly drops with `SocketOpenError: timeout waiting for "open"` plus "many errors seems not connected to our machine".
+
+**Investigation findings (verified live):**
+- `SocketOpenError` is a **browser-side** error from effect's WebSocket layer (`apps/web/src/wsTransport.ts`, default `openTimeout` 10s). **0 occurrences** in server logs/journal; **0 service crashes** (`NRestarts=0`).
+- Both `ws://127.0.0.1:3773/ws` and `wss://synara-minipc-local.easyrentbali.com/ws` open instantly when tested — the socket path itself is healthy.
+- Root cause of the disconnects: the **systemd unit ran `bun install` + `bun run build` as `ExecStartPre` on every (re)start** → ~30s windows where `/ws` was gone, so the browser's reconnect hit the 10s timeout = `SocketOpenError`.
+- The "not connected to our machine" errors are **upstream LLM gateway/credential failures** (in `~/.local/share/opencode/log/opencode.log`), NOT synara/host issues:
+  - `codex adapter: no dispatchable account credential` (codex-lb)
+  - `enowxai ... no active accounts for provider`
+  - `freemodel ... AI_APICallError: Not Found`
+  - `ken_bot_tg ... Bad Gateway` / `socket connection was closed unexpectedly`
+- One genuine synara bug: `session.abort`/`session.create` returned **500** (`err_*`) caused by `Expected a string starting with "ses", got "ea080afa-..."` — a bare-UUID resume cursor leaked into the OpenCode adapter.
+
+**Fixes applied:**
+
+1. **Split build out of the service hot path.** New oneshot `~/.config/systemd/user/synara-build.service` does `bun install --frozen-lockfile` + `bun run build`. The main `synara.service` no longer rebuilds on restart → restart downtime dropped from ~30s to ~0.3s.
+   - Rebuild + restart workflow now:
+     ```bash
+     systemctl --user start synara-build.service   # build (only when code changes)
+     systemctl --user restart synara.service        # fast restart, no rebuild
+     ```
+2. **Raised WS `openTimeout` 10s → 30s** in `apps/web/src/wsTransport.ts` (`Socket.layerWebSocket(url, { openTimeout: 30_000 })`) so a slow tunnel handshake on cold reconnect doesn't surface as `SocketOpenError`. Reconnect backoff is unchanged.
+3. **Guarded the OpenCode resume cursor** in `apps/server/src/provider/Layers/OpenCodeAdapter.ts` (`extractResumeSessionId` now only accepts `ses_`-prefixed ids via `isOpenCodeSessionId`). An unrecognized cursor starts a fresh session instead of crashing with a 500.
+4. **Pinned the agent runtime home via `SYNARA_HOME`** (the real cross-agent bug — affects Codex and any agent that uses the codex-home overlay, including "open folder" failures). `resolveDpCodeCodexHomeOverlayPath` (`apps/server/src/codexHomePaths.ts`) derives the overlay root from `SYNARA_HOME`/`DPCODE_HOME`/`T3CODE_HOME`, else falls back to `dirname(codexHome)/.synara/runtime`. With none set, a thread opened against a `/tmp`-rooted cwd/home pushed the overlay to **`/tmp/.synara/runtime/codex-home-overlay`**, which lacked the `agents/` symlink → `Refusing to create helper binaries under temporary dir "/tmp"` + `agents.*.config_file ... No such file` → every Codex action and folder-open failed. Both systemd units now export `SYNARA_HOME=%h/.synara/runtime`, so the overlay always resolves to `~/.synara/runtime/codex-home-overlay` regardless of which folder is opened. Stale `/tmp/.synara` removed.
+
+**Verification:** synara rebuilt (6/6 turbo tasks ok), restarted instantly (~0.3s), both WS endpoints OPEN, 38/38 OpenCodeAdapter unit tests pass, guard + openTimeout present in built bundles, `SYNARA_HOME` confirmed in live process env, overlay + `agents` symlink resolve under `~/.synara/runtime`, no `/tmp/.synara` recreated.
+
+**Files modified:**
+- `~/.config/systemd/user/synara.service` (removed `ExecStartPre` build steps, `RestartSec` 10→3, `TimeoutStartSec=60`, added `Environment=SYNARA_HOME=%h/.synara/runtime`)
+- `~/.config/systemd/user/synara-build.service` (new oneshot build unit, also exports `SYNARA_HOME`)
+- `apps/web/src/wsTransport.ts` (openTimeout 30s)
+- `apps/server/src/provider/Layers/OpenCodeAdapter.ts` (`ses_` resume-cursor guard)
+
+> Note: the LLM gateway/credential errors (ChatGPT "usage limit", `token_invalidated`, `refresh_token revoked`, 401s, `no active accounts for provider`) are separate **upstream account/infra** issues — re-auth the affected providers (codex via `codex login`, codex-lb, enowxai, freemodel). Not a synara bug and not a host/machine problem.
+
+---
+
 
 ## 1. OpenCode SQLite Error (`NOT NULL constraint failed: session_message.seq`)
 
