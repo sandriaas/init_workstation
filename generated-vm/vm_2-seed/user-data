@@ -2,7 +2,7 @@
 hostname: vm-2
 users:
   - name: sandriaas
-    passwd: "$6$rounds=4096$GFODZWH6pRbsllKo$R.xWj.X94Pv/zV/Bs3cy3WDxXvQ1z25slwrKVbbi41WwsErzbz56rYwb7.arGnKE4vGjGpCEdY4QtC0wF/319/"
+    passwd: "$6$rounds=4096$OfF4oigKEmvm8I1Q$3PpklPRi5Ow93Py4FYioH0MQdabeEOj/OjhmHmzocetQ0Eqrh8gaXxJo2HqYUI2obONh.y..b796I1Qk50hxn/"
     lock_passwd: false
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
